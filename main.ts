@@ -68,6 +68,7 @@ const DEFAULT_SETTINGS: ImageWorkflowSettings = {
 export default class ImageEnlargePlugin extends Plugin {
   settings: ImageWorkflowSettings = { ...DEFAULT_SETTINGS };
   private overlayEl: HTMLDivElement | null = null;
+  private imageEditor: ImageEditor | null = null;
   private imgInfo: ImgInfo = { curWidth: 0, curHeight: 0, realWidth: 0, realHeight: 0, left: 0, top: 0 };
   private overlayScope: Scope | null = null;
   private overlayAbortController: AbortController | null = null;
@@ -183,6 +184,7 @@ export default class ImageEnlargePlugin extends Plugin {
   }
 
   onunload() {
+    this.imageEditor?.close();
     this.closeOverlay();
   }
 
@@ -403,7 +405,12 @@ export default class ImageEnlargePlugin extends Plugin {
     const imageFile = found instanceof TFile ? found : null;
     const notePath = this.app.workspace.getActiveFile()?.path ?? null;
     this.closeOverlay();
-    new ImageEditor({ app: this.app, doc, src, imageFile, notePath }).open();
+    this.imageEditor?.close();
+    const editor = new ImageEditor({ app: this.app, doc, src, imageFile, notePath,
+      onClose: () => { if (this.imageEditor === editor) this.imageEditor = null; },
+    });
+    this.imageEditor = editor;
+    editor.open();
   }
 
   private srcToVaultPath(src: string): string {

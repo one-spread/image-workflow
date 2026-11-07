@@ -45,6 +45,7 @@ export interface ImageEditorOptions {
   src: string;
   imageFile: TFile | null;
   notePath: string | null;
+  onClose?: () => void;
 }
 
 export class ImageEditor {
@@ -65,6 +66,8 @@ export class ImageEditor {
   private swatches: HTMLButtonElement[] = [];
   private escArmedUntil = 0;
   private busy = false;
+  private disabledButtons = new Map<HTMLButtonElement, boolean>();
+  private loadingImage: HTMLImageElement | null = null;
   private objectUrl: string | null = null;
   // Session: the image drawn underneath, the file to overwrite on save (an
   // existing "-edited.png"), and the file whose embeds should point to the result.
@@ -131,6 +134,7 @@ export class ImageEditor {
     const ctx = this.canvas.getContext('2d');
     if (!ctx) {
       new Notice('Canvas is not available');
+      this.close();
       return;
     }
     this.ctx = ctx;
@@ -148,13 +152,21 @@ export class ImageEditor {
   }
 
   close(): void {
+    if (this.abort.signal.aborted) return;
     this.abort.abort();
+    if (this.loadingImage) {
+      this.loadingImage.onload = null;
+      this.loadingImage.onerror = null;
+      this.loadingImage.removeAttribute('src');
+      this.loadingImage = null;
+    }
     if (this.scope) this.o.app.keymap.popScope(this.scope);
     this.scope = null;
     this.root?.remove();
     this.root = null;
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.objectUrl = null;
+    this.o.onClose?.();
   }
 
   // ---- setup ----
@@ -168,6 +180,7 @@ export class ImageEditor {
 
     const isPng = clicked.extension.toLowerCase() === 'png';
     const clickedBytes = new Uint8Array(await app.vault.readBinary(clicked));
+    if (this.abort.signal.aborted) return '';
     const meta = isPng ? parseMeta(readPngText(clickedBytes, META_KEY)) : null;
     const embedded = isPng ? readPngChunk(clickedBytes, ORIGINAL_CHUNK) : null;
 
@@ -188,7 +201,9 @@ export class ImageEditor {
         this.baseFile = source;
         this.overwriteFile = clicked;
         this.pendingShapes = { shapes: meta.shapes, w: meta.w, h: meta.h };
-        return this.blobUrl(new Uint8Array(await app.vault.readBinary(source)), source.extension);
+        const bytes = new Uint8Array(await app.vault.readBinary(source));
+        if (this.abort.signal.aborted) return '';
+        return this.blobUrl(bytes, source.extension);
       }
       new Notice('Original image not found — editing the flattened image');
     }
@@ -219,13 +234,17 @@ export class ImageEditor {
     try {
       src = await this.resolveSession();
     } catch (err) {
+      if (this.abort.signal.aborted) return;
       console.error('Image Workflow: failed to read image', err);
       new Notice('Failed to load image for editing');
       this.close();
       return;
     }
+    if (this.abort.signal.aborted) return;
+    this.loadingImage = img;
     if (!this.o.imageFile && !/^(file|data|blob):/.test(src)) img.crossOrigin = 'anonymous';
     img.onload = () => {
+      if (this.abort.signal.aborted) return;
       let w = img.naturalWidth;
       let h = img.naturalHeight;
       if (w > MAX_CANVAS_DIM || h > MAX_CANVAS_DIM) {
@@ -261,6 +280,7 @@ export class ImageEditor {
   }
 
   private setTool(tool: Tool): void {
+    if (this.busy) return;
     this.commitText();
     this.tool = tool;
     this.toolButtons.forEach((btn, t) => btn.toggleClass('is-active', t === tool));
@@ -268,6 +288,7 @@ export class ImageEditor {
   }
 
   private setColor(color: string): void {
+    if (this.busy) return;
     this.color = color;
     this.swatches.forEach((sw) => sw.toggleClass('is-active', sw.getAttribute('aria-label') === color));
     if (this.textInput) this.textInput.style.color = color;
@@ -298,7 +319,7 @@ export class ImageEditor {
   // ---- pointer handling ----
 
   private onPointerDown(e: PointerEvent): void {
-    if (!this.image || e.button !== 0) return;
+    if (this.busy || !this.image || e.button !== 0) return;
     e.preventDefault();
     const p = this.toCanvas(e);
     if (this.tool === 'text') {
@@ -311,7 +332,7 @@ export class ImageEditor {
   }
 
   private onPointerMove(e: PointerEvent): void {
-    if (!this.dragStart) return;
+    if (this.busy || !this.dragStart) return;
     const p = this.toCanvas(e);
     const s = this.dragStart;
     const box = { x: Math.min(s.x, p.x), y: Math.min(s.y, p.y), w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y) };
@@ -323,7 +344,7 @@ export class ImageEditor {
   }
 
   private onPointerUp(e: PointerEvent): void {
-    if (!this.dragStart) return;
+    if (this.busy || !this.dragStart) return;
     this.onPointerMove(e);
     const d = this.draft;
     const big = d && ((d.kind === 'rect' || d.kind === 'mosaic' || d.kind === 'crop') ? d.w > MIN_DRAG && d.h > MIN_DRAG
@@ -373,6 +394,7 @@ export class ImageEditor {
   }
 
   private onEscape(): void {
+    if (this.busy) return;
     if (this.textInput) {
       this.textInput.value = '';
       this.commitText();
@@ -387,6 +409,7 @@ export class ImageEditor {
   }
 
   private undo(): void {
+    if (this.busy) return;
     this.shapes.pop();
     this.render();
   }
@@ -530,6 +553,21 @@ export class ImageEditor {
     }
   }
 
+  private setBusy(busy: boolean): void {
+    this.busy = busy;
+    if (busy) {
+      this.root?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
+        this.disabledButtons.set(button, button.disabled);
+        button.disabled = true;
+      });
+    } else {
+      this.disabledButtons.forEach((disabled, button) => { button.disabled = disabled; });
+      this.disabledButtons.clear();
+    }
+    this.draft = null;
+    this.dragStart = null;
+  }
+
   private async save(): Promise<void> {
     // No image yet (still loading): saving now would write a blank canvas.
     if (this.busy || !this.image || (!this.overwriteFile && !this.baseFile)) return;
@@ -540,7 +578,7 @@ export class ImageEditor {
       else new Notice('Nothing to save — draw something first');
       return;
     }
-    this.busy = true;
+    this.setBusy(true);
     try {
       const { app } = this.o;
       let bytes = this.toPngBytes();
@@ -582,14 +620,14 @@ export class ImageEditor {
       console.error('Image Workflow: save failed', err);
       new Notice(`Failed to save edited image: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      this.busy = false;
+      this.setBusy(false);
     }
   }
 
   // Write the original bytes back, dropping annotations and edit data.
   private async revert(): Promise<void> {
     if (this.busy || !this.overwriteFile || !this.originalBytes) return;
-    this.busy = true;
+    this.setBusy(true);
     try {
       await this.o.app.vault.modifyBinary(this.overwriteFile, toArrayBuffer(this.originalBytes));
       new Notice(`Restored the original ${this.overwriteFile.name}`);
@@ -598,7 +636,7 @@ export class ImageEditor {
       console.error('Image Workflow: revert failed', err);
       new Notice(`Failed to restore the original: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      this.busy = false;
+      this.setBusy(false);
     }
   }
 
@@ -643,11 +681,35 @@ function scaleShapes(shapes: Shape[], sx: number, sy: number): Shape[] {
   });
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validShape(value: unknown): value is Shape {
+  if (!isRecord(value)) return false;
+  const finite = (...keys: string[]) => keys.every((key) => typeof value[key] === 'number' && Number.isFinite(value[key]));
+  const positive = (...keys: string[]) => finite(...keys) && keys.every((key) => (value[key] as number) > 0);
+  const colored = typeof value.color === 'string';
+  switch (value.kind) {
+    case 'crop': return finite('x', 'y') && positive('w', 'h');
+    case 'mosaic': return finite('x', 'y') && positive('w', 'h', 'blockSize');
+    case 'rect': return finite('x', 'y') && positive('w', 'h', 'width') && colored;
+    case 'arrow': return finite('x1', 'y1', 'x2', 'y2') && positive('width') && colored;
+    case 'text': return finite('x', 'y') && positive('size') && colored && typeof value.text === 'string';
+    default: return false;
+  }
+}
+
 function parseMeta(text: string | null): EditMeta | null {
   if (!text) return null;
   try {
-    const meta = JSON.parse(text) as EditMeta;
-    if (meta && (meta.v === 1 || meta.v === 2) && Array.isArray(meta.shapes)) return meta;
+    const meta: unknown = JSON.parse(text);
+    if (!isRecord(meta) || (meta.v !== 1 && meta.v !== 2)) return null;
+    if (typeof meta.w !== 'number' || !Number.isFinite(meta.w) || meta.w <= 0 ||
+        typeof meta.h !== 'number' || !Number.isFinite(meta.h) || meta.h <= 0) return null;
+    if (meta.source !== undefined && typeof meta.source !== 'string') return null;
+    if (!Array.isArray(meta.shapes) || !meta.shapes.every(validShape)) return null;
+    return { v: meta.v, w: meta.w, h: meta.h, shapes: meta.shapes, source: meta.source };
   } catch (err) {
     console.error('Image Workflow: unreadable edit data', err);
   }

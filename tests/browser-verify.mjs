@@ -49,6 +49,37 @@ try {
  await page.getByRole('button',{name:'Undo',exact:true}).click();assert.equal(await page.evaluate(()=>editor.activeCrop()),null);
  await page.getByRole('button',{name:'Revert',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('.image-workflow-editor'));
  assert.equal(await page.evaluate(()=>saved.length===original.length&&saved.every((b,i)=>b===original[i])),true);
+ // A closed editor must not finish a pending vault load or retain a blob URL.
+ const cancelled = await page.evaluate(async()=>{
+  const read = app.vault.readBinary; let release;
+  app.vault.readBinary=()=>new Promise(resolve=>{release=resolve});
+  makeEditor(); const closed=editor; closed.close(); release(original.slice().buffer);
+  await new Promise(resolve=>setTimeout(resolve,30)); app.vault.readBinary=read;
+  return {url:closed.objectUrl,loaded:!!closed.image,root:closed.root};
+ });
+ assert.deepEqual(cancelled,{url:null,loaded:false,root:null});
+ // Corrupt metadata must fall back to the flattened PNG, without importing shapes.
+ await page.evaluate(()=>{
+  saved=IW.writePngChunk(IW.writePngText(original,'image-workflow',JSON.stringify({v:2,w:80,h:60,shapes:[null]})),'iwOg',original);
+  makeEditor();
+ });
+ await page.waitForFunction(()=>!!editor.image);
+ assert.equal(await page.evaluate(()=>editor.shapes.length),0);
+ await page.evaluate(()=>editor.close());
+ // While an asynchronous save is pending, keyboard undo and drawing cannot lose edits.
+ await page.evaluate(()=>{saved=original;makeEditor()});
+ await page.waitForFunction(()=>!!editor.image);
+ const saving=await page.evaluate(async()=>{
+  const write=app.vault.modifyBinary;let release;
+  app.vault.modifyBinary=(_file,data)=>new Promise(resolve=>{release=()=>{saved=new Uint8Array(data);resolve()}});
+  editor.shapes=[{kind:'rect',x:1,y:1,w:10,h:10,color:'#000000',width:3}];
+  const pending=editor.save();
+  const disabled=[...document.querySelectorAll('.image-workflow-editor button')].every(button=>button.disabled);
+  editor.undo();editor.onPointerDown({button:0,preventDefault(){throw new Error('Drawing was not blocked')}});
+  const count=editor.shapes.length;release();await pending;app.vault.modifyBinary=write;
+  return {disabled,count,savedCount:JSON.parse(IW.readPngText(saved,'image-workflow')).shapes.length};
+ });
+ assert.deepEqual(saving,{disabled:true,count:1,savedCount:1});
  const resize=await page.evaluate(async()=>{const c=document.createElement('canvas');c.width=2400;c.height=1600;const ctx=c.getContext('2d');ctx.fillStyle='red';ctx.fillRect(200,200,1000,800);const p=await IW.prepareCopyImage(c.toDataURL(),document);const bitmap=await createImageBitmap(await (await fetch(p.src)).blob());const o=document.createElement('canvas');o.width=bitmap.width;o.height=bitmap.height;const g=o.getContext('2d');g.drawImage(bitmap,0,0);return {width:p.width,height:p.height,alpha:g.getImageData(0,0,1,1).data[3],bytes:p.bytes}});
  assert.equal(resize.width,1200);assert.equal(resize.height,800);assert.equal(resize.alpha,0);assert.ok(resize.bytes>0);
  const formats=await page.evaluate(()=>{const root=document.createElement('div');root.innerHTML='<h1>Heading</h1><p>日本語<mark>強調</mark><strong>太字</strong></p><pre><code>  indented\ncode</code></pre><p><a class="internal-link" href="Note">Note</a></p>';const unstyled=root.cloneNode(true);IW.inlineStyleForExternalPaste(root,'gdocs');return {h1:root.querySelector('h1').getAttribute('style'),hasMark:!!root.querySelector('mark'),hasTable:!!root.querySelector('table[data-iw-code]'),code:root.querySelector('table').textContent,plain:IW.serializeToText(root,'plain'),slack:IW.serializeToText(unstyled,'slack')}});

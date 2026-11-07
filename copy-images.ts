@@ -46,11 +46,16 @@ export async function withCopyImageTimeout<T>(work: Promise<T>, fallback: T, tim
  * This is lossless for displayed pixels and also protects decode-failure fallbacks.
  */
 export function stripPrivatePngData(src: string): string {
-  if (!/^data:image\/png[;,]/i.test(src)) return src;
+  if (!/^data:/i.test(src)) return src;
   const comma = src.indexOf(',');
-  if (comma < 0 || !/;base64$/i.test(src.slice(0, comma))) return '';
+  if (comma < 0) return '';
   let bytes: Uint8Array;
-  try { bytes = Uint8Array.from(atob(src.slice(comma + 1)), ch => ch.charCodeAt(0)); } catch { return ''; }
+  try {
+    // Data URLs may percent-encode either base64 characters or raw PNG bytes.
+    const payload = src.slice(comma + 1).replace(/%([0-9a-f]{2})/gi, (_match, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+    const binary = /;base64$/i.test(src.slice(0, comma)) ? atob(payload) : payload;
+    bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
+  } catch { return ''; }
   const signature = [137, 80, 78, 71, 13, 10, 26, 10];
   // Non-PNG test/invalid sources cannot contain valid PNG editing chunks.
   if (bytes.length < 8 || !signature.every((b, i) => bytes[i] === b)) return src;

@@ -172,6 +172,22 @@ test('private PNG edit chunks are removed even when image decoding fails', async
   const makeChunk = (type, payload) => { const chunk = Buffer.alloc(payload.length + 12); chunk.writeUInt32BE(payload.length,0);chunk.write(type,4,4,'ascii');payload.copy(chunk,8);return chunk; };
   const edited = Buffer.concat([original.subarray(0,original.length-12),makeChunk('iwOg',Buffer.from('SECRET ORIGINAL')),makeChunk('tEXt',Buffer.from('image-workflow\0metadata')),original.subarray(original.length-12)]);
   const src='data:image/png;base64,'+edited.toString('base64');
+  for (const mime of ['image/x-png', 'application/octet-stream', 'image/jpeg']) {
+    const mislabeled = `data:${mime};base64,${edited.toString('base64')}`;
+    for (const options of [{ fail: true }, { width: 1, height: 1 }, { stalled: true }]) {
+      const { doc } = fakeDocument(options);
+      const result = await prepareCopyImage(mislabeled, doc, false, 5);
+      assert.deepEqual(Buffer.from(result.src.split(',')[1], 'base64'), original);
+    }
+  }
+  for (const encoded of [
+    'data:application/octet-stream;base64,%69' + edited.toString('base64').slice(1),
+    'data:application/octet-stream,' + [...edited].map(byte => '%' + byte.toString(16).padStart(2, '0')).join(''),
+  ]) {
+    const { doc } = fakeDocument({ fail: true });
+    const result = await prepareCopyImage(encoded, doc);
+    assert.deepEqual(Buffer.from(result.src.split(',')[1], 'base64'), original);
+  }
   const cleaned=stripPrivatePngData(src);
   assert.deepEqual(Buffer.from(cleaned.split(',')[1],'base64'),original);
   const {doc}=fakeDocument({stalled:true});
