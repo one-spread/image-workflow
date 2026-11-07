@@ -207,3 +207,5 @@
   font-weight: 700;
   outline: none;
 }
+
+.image-workflow-editor-share-hint { font-size: 11px; color: var(--text-muted); max-width: 240px; }
