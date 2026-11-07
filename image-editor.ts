@@ -1,5 +1,5 @@
-// Simple annotation editor shown from the image overlay: box, arrow and text
-// on top of the image, with undo.
+// Image editor shown from the overlay: box, arrow, text, mosaic and crop
+// with undo. Crop metadata uses the uncropped working-image coordinates.
 //
 // PNG images are saved in place: the file is overwritten with the annotated
 // image, and the untouched original plus the shapes are kept inside it
@@ -20,17 +20,20 @@ interface EditMeta {
   // v1: path of the original image (separate "-edited.png" file).
   // v2: absent; the original lives in the ORIGINAL_CHUNK of the same file.
   source?: string;
+  // Full working-image dimensions, even when the exported PNG is cropped.
   w: number;
   h: number;
   shapes: Shape[];
 }
 
-type Tool = 'rect' | 'arrow' | 'text';
+type Tool = 'rect' | 'arrow' | 'text' | 'mosaic' | 'crop';
 
 type Shape =
   | { kind: 'rect'; x: number; y: number; w: number; h: number; color: string; width: number }
   | { kind: 'arrow'; x1: number; y1: number; x2: number; y2: number; color: string; width: number }
-  | { kind: 'text'; x: number; y: number; text: string; color: string; size: number };
+  | { kind: 'text'; x: number; y: number; text: string; color: string; size: number }
+  | { kind: 'mosaic'; x: number; y: number; w: number; h: number; blockSize: number }
+  | { kind: 'crop'; x: number; y: number; w: number; h: number };
 
 const COLORS = ['#e53935', '#fb8c00', '#fdd835', '#43a047', '#1e88e5', '#000000', '#ffffff'];
 const MAX_CANVAS_DIM = 8192;
@@ -86,7 +89,7 @@ export class ImageEditor {
 
     const toolbar = root.createDiv({ cls: 'image-workflow-editor-toolbar' });
     const toolGroup = toolbar.createDiv({ cls: 'image-workflow-editor-group' });
-    ([['rect', 'Box'], ['arrow', 'Arrow'], ['text', 'Text']] as [Tool, string][]).forEach(([tool, label]) => {
+    ([['rect', 'Box'], ['arrow', 'Arrow'], ['text', 'Text'], ['mosaic', 'Mosaic'], ['crop', 'Crop']] as [Tool, string][]).forEach(([tool, label]) => {
       const btn = toolGroup.createEl('button', { text: label, cls: 'image-workflow-editor-btn' });
       btn.addEventListener('click', () => this.setTool(tool), { signal });
       this.toolButtons.set(tool, btn);
@@ -99,6 +102,8 @@ export class ImageEditor {
       sw.addEventListener('click', () => this.setColor(c), { signal });
       this.swatches.push(sw);
     });
+
+    toolbar.createSpan({ cls: 'image-workflow-editor-share-hint', text: 'Save keeps a recoverable original. Use Copy to share a flattened image.' });
 
     const actionGroup = toolbar.createDiv({ cls: 'image-workflow-editor-group' });
     const undoBtn = actionGroup.createEl('button', { text: 'Undo', cls: 'image-workflow-editor-btn' });
@@ -285,8 +290,8 @@ export class ImageEditor {
   private toCanvas(e: PointerEvent): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
     return {
-      x: (e.clientX - rect.left) * (this.canvas.width / rect.width),
-      y: (e.clientY - rect.top) * (this.canvas.height / rect.height),
+      x: Math.max(0, Math.min(this.canvas.width, (e.clientX - rect.left) * (this.canvas.width / rect.width))),
+      y: Math.max(0, Math.min(this.canvas.height, (e.clientY - rect.top) * (this.canvas.height / rect.height))),
     };
   }
 
@@ -309,9 +314,11 @@ export class ImageEditor {
     if (!this.dragStart) return;
     const p = this.toCanvas(e);
     const s = this.dragStart;
-    this.draft = this.tool === 'rect'
-      ? { kind: 'rect', x: Math.min(s.x, p.x), y: Math.min(s.y, p.y), w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y), color: this.color, width: this.lineWidth }
-      : { kind: 'arrow', x1: s.x, y1: s.y, x2: p.x, y2: p.y, color: this.color, width: this.lineWidth };
+    const box = { x: Math.min(s.x, p.x), y: Math.min(s.y, p.y), w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y) };
+    if (this.tool === 'crop') this.draft = { kind: 'crop', ...box };
+    else if (this.tool === 'mosaic') this.draft = { kind: 'mosaic', ...box, blockSize: Math.max(8, Math.round(this.base / 80)) };
+    else if (this.tool === 'rect') this.draft = { kind: 'rect', ...box, color: this.color, width: this.lineWidth };
+    else this.draft = { kind: 'arrow', x1: s.x, y1: s.y, x2: p.x, y2: p.y, color: this.color, width: this.lineWidth };
     this.render();
   }
 
@@ -319,7 +326,7 @@ export class ImageEditor {
     if (!this.dragStart) return;
     this.onPointerMove(e);
     const d = this.draft;
-    const big = d && (d.kind === 'rect' ? d.w > MIN_DRAG && d.h > MIN_DRAG
+    const big = d && ((d.kind === 'rect' || d.kind === 'mosaic' || d.kind === 'crop') ? d.w > MIN_DRAG && d.h > MIN_DRAG
       : d.kind === 'arrow' ? Math.hypot(d.x2 - d.x1, d.y2 - d.y1) > MIN_DRAG * 2 : false);
     if (d && big) this.shapes.push(d);
     this.draft = null;
@@ -386,21 +393,70 @@ export class ImageEditor {
 
   // ---- drawing ----
 
-  private render(): void {
+  private render(preview = true): void {
     if (!this.image) return;
     const { ctx, canvas } = this;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(this.image, 0, 0, canvas.width, canvas.height);
     this.shapes.forEach((s) => this.drawShape(s));
-    if (this.draft) this.drawShape(this.draft);
+    if (preview && this.draft) this.drawShape(this.draft);
+    // Cropping never changes the working coordinate space. Only export crops
+    // pixels; metadata remains relative to the original-sized working canvas.
+    const crop = preview ? this.activeCrop() : null;
+    if (crop) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      ctx.fillRect(0, 0, canvas.width, crop.y);
+      ctx.fillRect(0, crop.y + crop.h, canvas.width, canvas.height - crop.y - crop.h);
+      ctx.fillRect(0, crop.y, crop.x, crop.h);
+      ctx.fillRect(crop.x + crop.w, crop.y, canvas.width - crop.x - crop.w, crop.h);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = this.lineWidth;
+      ctx.strokeRect(crop.x, crop.y, crop.w, crop.h);
+      ctx.restore();
+    }
+  }
+
+  private activeCrop(includeDraft = true): Extract<Shape, { kind: 'crop' }> | null {
+    const shapes = includeDraft && this.draft?.kind === 'crop' ? [...this.shapes, this.draft] : this.shapes;
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const shape = shapes[i];
+      if (shape.kind === 'crop') {
+        const x = Math.max(0, Math.min(this.canvas.width - 1, Math.round(shape.x)));
+        const y = Math.max(0, Math.min(this.canvas.height - 1, Math.round(shape.y)));
+        return { kind: 'crop', x, y, w: Math.max(1, Math.min(this.canvas.width - x, Math.round(shape.w))), h: Math.max(1, Math.min(this.canvas.height - y, Math.round(shape.h))) };
+      }
+    }
+    return null;
   }
 
   private drawShape(s: Shape): void {
     const { ctx } = this;
+    if (s.kind === 'crop') return;
     ctx.save();
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    if (s.kind === 'rect') {
+    if (s.kind === 'mosaic') {
+      const x = Math.max(0, Math.floor(s.x));
+      const y = Math.max(0, Math.floor(s.y));
+      const right = Math.min(this.canvas.width, Math.ceil(s.x + s.w));
+      const bottom = Math.min(this.canvas.height, Math.ceil(s.y + s.h));
+      const w = right - x;
+      const h = bottom - y;
+      if (w > 0 && h > 0) {
+        const sample = this.o.doc.createElement('canvas');
+        sample.width = Math.max(1, Math.ceil(w / s.blockSize));
+        sample.height = Math.max(1, Math.ceil(h / s.blockSize));
+        const sampleCtx = sample.getContext('2d');
+        if (sampleCtx) {
+          sampleCtx.drawImage(this.canvas, x, y, w, h, 0, 0, sample.width, sample.height);
+          ctx.imageSmoothingEnabled = false;
+          // Clear first so transparent images do not retain the original detail.
+          ctx.clearRect(x, y, w, h);
+          ctx.drawImage(sample, 0, 0, sample.width, sample.height, x, y, w, h);
+        }
+      }
+    } else if (s.kind === 'rect') {
       ctx.strokeStyle = s.color;
       ctx.lineWidth = s.width;
       ctx.strokeRect(s.x, s.y, s.w, s.h);
@@ -440,8 +496,20 @@ export class ImageEditor {
   // unfocused windows, which left Save waiting forever in testing.
   private toPngBytes(): Uint8Array {
     this.commitText();
-    this.render();
-    const dataUrl = this.canvas.toDataURL('image/png');
+    this.render(false);
+    let output = this.canvas;
+    const crop = this.activeCrop(false);
+    if (crop) {
+      output = this.o.doc.createElement('canvas');
+      output.width = crop.w;
+      output.height = crop.h;
+      const ctx = output.getContext('2d');
+      if (!ctx) throw new Error('Canvas is not available');
+      ctx.drawImage(this.canvas, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
+    }
+    let dataUrl: string;
+    try { dataUrl = output.toDataURL('image/png'); }
+    finally { this.render(); }
     const bin = atob(dataUrl.slice(dataUrl.indexOf(',') + 1));
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -567,6 +635,8 @@ function scaleShapes(shapes: Shape[], sx: number, sy: number): Shape[] {
   if (!isFinite(sx) || !isFinite(sy) || (sx === 1 && sy === 1)) return shapes.map((s) => ({ ...s }));
   const sl = (sx + sy) / 2;
   return shapes.map((s) => {
+    if (s.kind === 'crop') return { ...s, x: s.x * sx, y: s.y * sy, w: s.w * sx, h: s.h * sy };
+    if (s.kind === 'mosaic') return { ...s, x: s.x * sx, y: s.y * sy, w: s.w * sx, h: s.h * sy, blockSize: s.blockSize * sl };
     if (s.kind === 'rect') return { ...s, x: s.x * sx, y: s.y * sy, w: s.w * sx, h: s.h * sy, width: s.width * sl };
     if (s.kind === 'arrow') return { ...s, x1: s.x1 * sx, y1: s.y1 * sy, x2: s.x2 * sx, y2: s.y2 * sy, width: s.width * sl };
     return { ...s, x: s.x * sx, y: s.y * sy, size: s.size * sl };
@@ -585,5 +655,5 @@ function parseMeta(text: string | null): EditMeta | null {
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }

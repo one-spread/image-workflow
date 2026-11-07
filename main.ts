@@ -1,6 +1,7 @@
 import { App, Component, Editor, FileSystemAdapter, MarkdownRenderer, MarkdownView, Notice, Plugin, PluginSettingTab, requestUrl, Scope, Setting, SuggestModal, TFile } from 'obsidian';
 import { buildChatHtml, serializeToText, TextFlavor } from './copy-text';
 import { ImageEditor } from './image-editor';
+import { copyImageSummary, prepareCopyImage, withCopyImageTimeout } from './copy-images';
 import { buildClipboardHtml, CLIPBOARD_MARKER, DocsHeadingStyles, GOOGLE_DOCS_STANDARD_HEADINGS, HeadingLevel, HtmlTarget, inlineStyleForExternalPaste, preserveSoftLineBreaks } from './html-style';
 
 const IMG_SELECTOR = `.workspace-leaf-content[data-type='markdown'] img:not(a img), .workspace-leaf-content[data-type='image'] img`;
@@ -186,7 +187,7 @@ export default class ImageEnlargePlugin extends Plugin {
   }
 
   async loadSettings() {
-    const loaded = await this.loadData();
+    const loaded: unknown = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, isSettingsObject(loaded) ? loaded : {});
     this.settings.docsHeadingStyles = Object.assign({}, GOOGLE_DOCS_STANDARD_HEADINGS, this.settings.docsHeadingStyles);
     if (!COPY_TARGETS.some((t) => t.id === this.settings.lastCopyTarget)) {
@@ -660,17 +661,36 @@ export default class ImageEnlargePlugin extends Plugin {
 
   private async embedRenderedImages(root: HTMLElement, sourcePath: string): Promise<void> {
     const imgs = Array.from(root.querySelectorAll('img'));
-    await Promise.all(imgs.map(async (img) => {
-      const src = img.getAttribute('src');
-      if (!src || src.startsWith('data:')) return;
-
-      const embedSrc = this.getRenderedImageEmbedSrc(img, sourcePath);
-      const dataUrl = await this.resolveImageSrc(embedSrc, sourcePath);
-      if (dataUrl) {
-        img.setAttribute('src', dataUrl);
+    let next = 0;
+    let embedded = 0;
+    let bytes = 0;
+    // Limit concurrent decodes/canvases for image-heavy notes.
+    await Promise.all(Array.from({ length: Math.min(2, imgs.length) }, async () => {
+      while (next < imgs.length) {
+        const img = imgs[next++];
+        const src = img.getAttribute('src');
+        if (!src) continue;
+        const dataUrl = /^data:/i.test(src) ? src : await withCopyImageTimeout(
+          this.resolveImageSrc(this.getRenderedImageEmbedSrc(img, sourcePath), sourcePath), null, undefined, root.ownerDocument.defaultView ?? window,
+        ).catch(() => null);
+        if (!dataUrl) continue;
+        const prepared = await prepareCopyImage(dataUrl, root.ownerDocument);
+        if (!prepared.src) { img.remove(); continue; }
+        img.setAttribute('src', prepared.src);
         img.removeAttribute('srcset');
+        if (prepared.width && prepared.height) {
+          // Retain deliberately small rendered widths while preventing display upscaling.
+          const width = Math.min(Number(img.getAttribute('width')) || prepared.width, prepared.width);
+          img.setAttribute('width', String(width));
+          img.setAttribute('height', String(Math.max(1, Math.round(width * prepared.height / prepared.width))));
+        }
+        if (/^data:/i.test(prepared.src)) {
+          embedded++;
+          bytes += prepared.bytes;
+        }
       }
     }));
+    if (imgs.length) new Notice(copyImageSummary(embedded, bytes), bytes > MAX_EMBED_BYTES ? 8000 : 5000);
   }
 
   private getRenderedImageEmbedSrc(img: HTMLImageElement, sourcePath: string): string {
@@ -847,7 +867,8 @@ async function convertSvgToImg(root: HTMLElement): Promise<void> {
   });
 
   const svgs = Array.from(root.querySelectorAll<SVGSVGElement>('svg'));
-  await Promise.all(svgs.map(async (svg) => {
+  // Bound rasterization memory and yield between diagrams.
+  for (const svg of svgs) {
     try {
       const png = await rasterizeSvg(svg);
       if (png) {
@@ -856,7 +877,7 @@ async function convertSvgToImg(root: HTMLElement): Promise<void> {
     } catch (err) {
       console.error('SVG rasterization failed', err);
     }
-  }));
+  }
 }
 
 async function rasterizeSvg(svg: SVGSVGElement): Promise<HTMLImageElement | null> {
@@ -875,42 +896,14 @@ async function rasterizeSvg(svg: SVGSVGElement): Promise<HTMLImageElement | null
   if (!svg.getAttribute('height')) svg.setAttribute('height', String(cssH));
 
   const serialized = new XMLSerializer().serializeToString(svg);
-  const svgBlob = new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' });
-  const url = URL.createObjectURL(svgBlob);
-
-  try {
-    const dpr = 2; // 2x for crisper paste in Docs / Gmail
-    const png = await new Promise<HTMLImageElement | null>((resolve) => {
-      const loader = svg.doc.createElement('img');
-      loader.onload = () => {
-        try {
-          const canvas = svg.doc.createElement('canvas');
-          canvas.width = Math.max(1, Math.round(cssW * dpr));
-          canvas.height = Math.max(1, Math.round(cssH * dpr));
-          const ctx = canvas.getContext('2d');
-          if (!ctx) return resolve(null);
-          ctx.fillStyle = '#fff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(loader, 0, 0, canvas.width, canvas.height);
-          const dataUrl = canvas.toDataURL('image/png');
-          const img = svg.doc.createElement('img');
-          img.src = dataUrl;
-          img.width = Math.round(cssW);
-          img.height = Math.round(cssH);
-          img.alt = 'diagram';
-          resolve(img);
-        } catch (err) {
-          console.error('canvas draw failed', err);
-          resolve(null);
-        }
-      };
-      loader.onerror = () => resolve(null);
-      loader.src = url;
-    });
-    return png;
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  const prepared = await prepareCopyImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(serialized)}`, svg.ownerDocument, true);
+  if (!prepared.width || !prepared.height || !prepared.src.startsWith('data:image/png')) return null;
+  const img = svg.ownerDocument.createElement('img');
+  img.src = prepared.src;
+  img.width = prepared.width;
+  img.height = prepared.height;
+  img.alt = 'diagram';
+  return img;
 }
 
 async function fetchAsDataUrl(url: string): Promise<string | null> {
@@ -968,87 +961,50 @@ class ImageWorkflowSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-
-    new Setting(containerEl)
-      .setName('Rich copy on Cmd/Ctrl+C')
-      .setDesc(
-        'Off by default: Cmd/Ctrl+C copies plain markdown as usual. When enabled, ' +
-        'copying a selection that contains image embeds (![[...]] or ![](...)) writes ' +
-        'Google Docs-friendly HTML with images embedded as base64. Destination-specific ' +
-        'copies are always available from "Copy for…" (command palette / right-click).'
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.autoEmbedOnCopy)
-          .onChange(async (value) => {
-            this.plugin.settings.autoEmbedOnCopy = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Format all markdown copies for Google apps')
-      .setDesc(
-        'When enabled, every markdown selection copied with Cmd/Ctrl+C is written ' +
-        'as Google Docs-friendly HTML, even when it does not contain images. Leave ' +
-        'this off if you only want automatic rich copy for selections with image embeds.'
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.autoFormatMarkdownOnCopy)
-          .onChange(async (value) => {
-            this.plugin.settings.autoFormatMarkdownOnCopy = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Preserve line breaks for Google paste')
-      .setDesc(
-        'When enabled, soft line breaks inside paragraphs are kept as visible line ' +
-        'breaks in the HTML copied for Google Docs, Gmail, and other Google editors. ' +
-        'The plain markdown clipboard text is unchanged.'
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.preserveSoftLineBreaks)
-          .onChange(async (value) => {
-            this.plugin.settings.preserveSoftLineBreaks = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Google Docs heading styles')
-      .setHeading();
-    containerEl.createEl('p', {
-      cls: 'setting-item-description',
-      text: 'Google Docs keeps any heading value that differs from the document\'s own heading style as manual formatting. ' +
-        'Enter CSS matching your Docs template (Format → Paragraph styles) so pasted headings follow it exactly.',
+  // Expose searchable definitions on Obsidian 1.13+, while retaining a renderer
+  // compatible with the existing minimum version.
+  getSettingDefinitions() {
+    const toggle = (name: string, desc: string, key: 'autoEmbedOnCopy' | 'autoFormatMarkdownOnCopy' | 'preserveSoftLineBreaks') => ({
+      name, desc,
+      render: (setting: Setting) => { setting.addToggle(control => control
+        .setValue(this.plugin.settings[key])
+        .onChange(async value => { this.plugin.settings[key] = value; await this.plugin.saveSettings(); })); },
     });
-    new Setting(containerEl)
-      .setName('Reset to Google Docs standard')
-      .addButton((btn) =>
-        btn.setButtonText('Reset').onClick(async () => {
+    return [
+      toggle('Rich copy on Cmd/Ctrl+C', 'Off by default: Cmd/Ctrl+C copies plain markdown as usual. Enable to copy selections with image embeds as rich HTML. Copy for… commands are always available.', 'autoEmbedOnCopy'),
+      toggle('Format all markdown copies for Google apps', 'When automatic rich copy is enabled, include selections without images.', 'autoFormatMarkdownOnCopy'),
+      toggle('Preserve line breaks for Google paste', 'Keep soft line breaks visible in rich HTML. Plain markdown is unchanged.', 'preserveSoftLineBreaks'),
+      {
+        name: 'Google Docs heading styles',
+        desc: 'Match these CSS values to your Docs template so pasted headings use its styles.',
+        render: (setting: Setting) => { setting.setHeading(); },
+      },
+      {
+        name: 'Reset to Google Docs standard',
+        render: (setting: Setting) => { setting.addButton(button => button.setButtonText('Reset').onClick(async () => {
           this.plugin.settings.docsHeadingStyles = { ...GOOGLE_DOCS_STANDARD_HEADINGS };
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-    (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as HeadingLevel[]).forEach((level) => {
-      new Setting(containerEl)
-        .setName(`Heading ${level.slice(1)}`)
-        .addTextArea((ta) => {
-          ta.inputEl.rows = 2;
-          ta.inputEl.addClass('image-workflow-heading-css');
-          ta.setValue(this.plugin.settings.docsHeadingStyles[level]).onChange(async (value) => {
-            this.plugin.settings.docsHeadingStyles[level] = value.trim();
-            await this.plugin.saveSettings();
+          await this.plugin.saveSettings(); this.display();
+        })); },
+      },
+      ...(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as HeadingLevel[]).map(level => ({
+        name: `Heading ${level.slice(1)}`,
+        render: (setting: Setting) => { setting.addTextArea(control => {
+          control.inputEl.rows = 2;
+          control.inputEl.addClass('image-workflow-heading-css');
+          control.setValue(this.plugin.settings.docsHeadingStyles[level]).onChange(async value => {
+            this.plugin.settings.docsHeadingStyles[level] = value.trim(); await this.plugin.saveSettings();
           });
-        });
-    });
+        }); },
+      })),
+    ];
+  }
+
+  display(): void {
+    this.containerEl.empty();
+    for (const definition of this.getSettingDefinitions()) {
+      const setting = new Setting(this.containerEl).setName(definition.name);
+      if ('desc' in definition && definition.desc) setting.setDesc(definition.desc);
+      definition.render(setting);
+    }
   }
 }

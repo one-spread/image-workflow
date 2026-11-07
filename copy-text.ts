@@ -364,13 +364,13 @@ export function buildChatHtml(root: HTMLElement): string {
   clone.querySelectorAll('mjx-container, .math').forEach((el) => el.replaceWith(doc.createTextNode('[数式]')));
   clone.querySelectorAll('svg').forEach((el) => el.remove());
   clone.querySelectorAll('table').forEach((el) => {
-    const { rows, hasHeader } = tableRows(el as HTMLElement, (c) => c.textContent ?? '');
+    const { rows, hasHeader } = tableRows(el, (c) => c.textContent ?? '');
     const pre = doc.createElement('pre');
     pre.textContent = padTable(rows, hasHeader);
     el.replaceWith(pre);
   });
   clone.querySelectorAll('pre').forEach((pre) => {
-    const text = codeText(pre as HTMLElement);
+    const text = codeText(pre);
     const next = doc.createElement('pre');
     next.textContent = text;
     pre.replaceWith(next);

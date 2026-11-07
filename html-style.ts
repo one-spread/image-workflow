@@ -182,7 +182,7 @@ function styleCodeBlocks(root: HTMLElement): void {
 
     const table = doc.createElement('table');
     table.setAttribute('data-iw-code', '1');
-    table.setAttribute('style', 'border-collapse:collapse; width:100%; border:1px solid #d0d7de');
+    setStyle(table, 'border-collapse:collapse; width:100%; border:1px solid #d0d7de');
     const tr = doc.createElement('tr');
     const td = doc.createElement('td');
     // Background on the cell (Docs ignores table backgrounds). No line-height:
