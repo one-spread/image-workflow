@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs コードブロック貼り付けテスト</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; max-width: 860px; margin: 32px auto; padding: 0 16px; color: #202124; background: #fff; }
+  h1 { font-size: 20px; }
+  .card { border: 1px solid #dadce0; border-radius: 8px; padding: 16px; margin: 16px 0; }
+  .card h2 { font-size: 16px; margin: 0 0 4px; }
+  .card p.desc { margin: 0 0 12px; color: #5f6368; font-size: 13px; }
+  button { font-size: 14px; padding: 6px 14px; border-radius: 6px; border: 1px solid #1a73e8; background: #1a73e8; color: #fff; cursor: pointer; }
+  button.done { background: #188038; border-color: #188038; }
+  .preview { margin-top: 12px; padding: 12px; border: 1px dashed #dadce0; border-radius: 6px; }
+  ol li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<h1>Google Docs コードブロック貼り付けテスト</h1>
+<ol>
+  <li>Google Docs で空のドキュメントを開く</li>
+  <li>下の各パターンの「コピー」を押して、Docs に貼り付ける（パターン名も一緒に入ります）</li>
+  <li>見た目・編集しやすさ・インデントが残るかを比べる</li>
+</ol>
+<div id="cards"></div>
+
+<script>
+const CODE = [
+  "// 合計金額を計算する",
+  "function total(items) {",
+  "  let sum = 0;",
+  "  for (const item of items) {",
+  "    sum += item.price * item.qty;",
+  "  }",
+  "",
+  "\treturn sum; // タブ字下げ",
+  "}"
+];
+const MONO = "font-family:'Roboto Mono','Courier New',monospace; font-size:10pt; color:#202124";
+const BG = "#f1f3f4";
+
+function esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+// 行頭の空白を &nbsp; に（Docs に詰められないように）、タブは4スペース
+function keepIndent(line) {
+  const l = line.replace(/\t/g, "    ");
+  const m = l.match(/^ */)[0].length;
+  return "&nbsp;".repeat(m) + esc(l.slice(m));
+}
+
+const VARIANTS = [
+  {
+    name: "A. 1セルの表（現在のプラグイン）",
+    desc: "現状の出力。背景と枠は付くが、Docs では表になる。",
+    build() {
+      const body = CODE.map(l => `<span>${esc(l.replace(/\t/g, "    "))}</span>`).join("<br>");
+      return `<table style="border-collapse:collapse; margin:8px 0; width:100%; background:#f6f8fa; border:1px solid #e1e4e8"><tr><td style="padding:12px 16px; font-family:Menlo, Consolas, 'Courier New', monospace; font-size:13px; line-height:1.45; color:#24292e; white-space:pre-wrap; border:1px solid #e1e4e8">${body}</td></tr></table>`;
+    }
+  },
+  {
+    name: "B. 等幅フォントの段落",
+    desc: "1行＝1段落。背景なし。",
+    build() {
+      return CODE.map(l => `<p style="margin:0; line-height:1.3; ${MONO}">${l ? keepIndent(l) : "&nbsp;"}</p>`).join("");
+    }
+  },
+  {
+    name: "C. 等幅＋文字の背景（ハイライト）",
+    desc: "文字の後ろだけ薄いグレー。行末までは塗られない想定。",
+    build() {
+      return CODE.map(l => `<p style="margin:0; line-height:1.3"><span style="${MONO}; background-color:${BG}">${l ? keepIndent(l) : "&nbsp;"}</span></p>`).join("");
+    }
+  },
+  {
+    name: "D. 等幅＋段落の背景",
+    desc: "段落そのものに背景色を指定。Docs が段落の網かけとして受けるかを確認。",
+    build() {
+      return CODE.map(l => `<p style="margin:0; line-height:1.3; padding:0 8px; background-color:${BG}; ${MONO}">${l ? keepIndent(l) : "&nbsp;"}</p>`).join("");
+    }
+  },
+  {
+    name: "E. 等幅＋段落の背景＋枠線",
+    desc: "D に左右上下の枠線を追加。Docs の段落の枠線として残るかを確認。",
+    build() {
+      return CODE.map((l, i) => {
+        const top = i === 0 ? "border-top:1px solid #dadce0;" : "";
+        const bottom = i === CODE.length - 1 ? "border-bottom:1px solid #dadce0;" : "";
+        return `<p style="margin:0; line-height:1.3; padding:0 8px; background-color:${BG}; border-left:1px solid #dadce0; border-right:1px solid #dadce0; ${top}${bottom} ${MONO}">${l ? keepIndent(l) : "&nbsp;"}</p>`;
+      }).join("");
+    }
+  },
+  {
+    name: "G. Docs ネイティブのコードブロック再現（マーカー文字あり）",
+    desc: "Docs の HTML 書き出しと同じ構造。先頭に開始マーカー U+EC03、最後に終了マーカー U+EC02 の段落。Docs がコードブロックとして復元するかを確認。",
+    build() {
+      const P = "margin:0; padding-top:0pt; padding-bottom:0pt; line-height:1.15; text-align:left";
+      const CODE_SPAN = "color:#188038; font-weight:400; font-size:9pt; font-family:'Roboto Mono'; font-style:normal";
+      const lines = CODE.map((l, i) => {
+        const start = i === 0 ? `<span style="color:#188038">\uEC03</span>` : "";
+        return `<p style="${P}">${start}<span style="${CODE_SPAN}">${l ? keepIndent(l) : "&nbsp;"}</span></p>`;
+      });
+      lines.push(`<p style="${P}"><span style="color:#188038">\uEC02</span></p>`);
+      return lines.join("");
+    }
+  },
+  {
+    name: "H. Docs 風の見た目だけ（マーカーなし）",
+    desc: "Roboto Mono 9pt・緑文字だけ真似る。G が失敗したときの代替。",
+    build() {
+      const CODE_SPAN = "color:#188038; font-size:9pt; font-family:'Roboto Mono',monospace";
+      return CODE.map(l => `<p style="margin:0; line-height:1.15"><span style="${CODE_SPAN}">${l ? keepIndent(l) : "&nbsp;"}</span></p>`).join("");
+    }
+  },
+  {
+    name: "F. 素の <pre>（参考）",
+    desc: "何も加工しない場合に Docs がどう扱うかの参考。",
+    build() {
+      return `<pre>${esc(CODE.join("\n"))}</pre>`;
+    }
+  }
+];
+
+function wrap(name, inner) {
+  const frag = `<div style="font-family:Arial, sans-serif; font-size:11pt; color:#202124"><p style="margin:12px 0 4px"><b>${esc(name)}</b></p><p style="margin:0 0 4px">前の段落です。</p>${inner}<p style="margin:4px 0 0">後ろの段落です。</p></div>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><!--StartFragment-->${frag}<!--EndFragment--></body></html>`;
+}
+
+function copyHtml(html, plain) {
+  const onCopy = (e) => {
+    e.clipboardData.setData("text/html", html);
+    e.clipboardData.setData("text/plain", plain);
+    e.preventDefault();
+  };
+  document.addEventListener("copy", onCopy, { once: true });
+  const ok = document.execCommand("copy");
+  document.removeEventListener("copy", onCopy);
+  return ok;
+}
+
+const cards = document.getElementById("cards");
+VARIANTS.forEach(v => {
+  const inner = v.build();
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<h2>${esc(v.name)}</h2><p class="desc">${esc(v.desc)}</p><button>コピー</button><div class="preview">${inner}</div>`;
+  const btn = card.querySelector("button");
+  btn.addEventListener("click", () => {
+    const ok = copyHtml(wrap(v.name, inner), CODE.join("\n"));
+    btn.textContent = ok ? "コピーしました → Docs に貼り付け" : "コピー失敗";
+    btn.classList.toggle("done", ok);
+    setTimeout(() => { btn.textContent = "コピー"; btn.classList.remove("done"); }, 2500);
+  });
+  cards.appendChild(card);
+});
+</script>
+</body>
+</html>

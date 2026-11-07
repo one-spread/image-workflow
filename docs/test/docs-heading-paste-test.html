@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs 見出し貼り付けテスト</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; max-width: 860px; margin: 32px auto; padding: 0 16px; color: #202124; background: #fff; }
+  .card { border: 1px solid #dadce0; border-radius: 8px; padding: 16px; margin: 16px 0; }
+  .card h2.t { font-size: 16px; margin: 0 0 4px; }
+  .card p.desc { margin: 0 0 12px; color: #5f6368; font-size: 13px; }
+  button { font-size: 14px; padding: 6px 14px; border-radius: 6px; border: 1px solid #1a73e8; background: #1a73e8; color: #fff; cursor: pointer; }
+  button.done { background: #188038; border-color: #188038; }
+</style>
+</head>
+<body>
+<h1 style="font-size:20px">Google Docs 見出し貼り付けテスト</h1>
+<p>見出しスタイルを変えてある Docs（今回のドキュメント）に、各パターンを貼って「見出しが文書のスタイルどおりになるか」を比べてください。</p>
+<div id="cards"></div>
+<script>
+const NAME = (n) => `<p><b>${n}</b></p>`;
+const BODY = (h1, h2, h3, p, ul) => `${h1}見出し1のテスト</h1x>${h2}見出し2のテスト</h2x>${h3}見出し3のテスト</h3x>${p}本文の段落です。</px>${ul}`;
+const fix = (s) => s.replace(/<\/h([1-3])x>/g, '</h$1>').replace(/<\/px>/g, '</p>');
+const LIST = '<ul><li>箇条書き1</li><li>箇条書き2</li></ul>';
+
+const VARIANTS = [
+  { name: 'A. 現在（タグだけ・スタイルなし）', desc: 'いまのプラグインの出力。', html: () => fix(BODY('<h1>', '<h2>', '<h3>', '<p>', LIST)) },
+  { name: 'B. 余白・サイズを 0 / inherit で打ち消し', desc: 'ブラウザ既定の大きさ・余白を Docs に渡さないようにする。',
+    html: () => fix(BODY(
+      '<h1 style="font-size:inherit;font-weight:inherit;color:inherit;margin:0">',
+      '<h2 style="font-size:inherit;font-weight:inherit;color:inherit;margin:0">',
+      '<h3 style="font-size:inherit;font-weight:inherit;color:inherit;margin:0">',
+      '<p style="margin:0">', LIST)) },
+  { name: 'C. Docs の書き出し形式を模倣', desc: 'Docs から Docs へコピーしたときと同じ包み方（docs-internal-guid）。',
+    html: () => {
+      const guid = 'docs-internal-guid-' + Math.random().toString(16).slice(2, 10) + '-7fff-' + Math.random().toString(16).slice(2, 14);
+      return `<b style="font-weight:normal;" id="${guid}">` +
+        '<h1 dir="ltr" style="line-height:1.38;margin-top:20pt;margin-bottom:6pt;"><span style="font-size:20pt;font-family:Arial,sans-serif;color:#000000;background-color:transparent;font-weight:400;font-style:normal;font-variant:normal;text-decoration:none;vertical-align:baseline;white-space:pre;white-space:pre-wrap;">見出し1のテスト</span></h1>' +
+        '<h2 dir="ltr" style="line-height:1.38;margin-top:18pt;margin-bottom:6pt;"><span style="font-size:16pt;font-family:Arial,sans-serif;color:#000000;background-color:transparent;font-weight:400;font-style:normal;font-variant:normal;text-decoration:none;vertical-align:baseline;white-space:pre;white-space:pre-wrap;">見出し2のテスト</span></h2>' +
+        '<h3 dir="ltr" style="line-height:1.38;margin-top:16pt;margin-bottom:4pt;"><span style="font-size:14pt;font-family:Arial,sans-serif;color:#434343;background-color:transparent;font-weight:400;font-style:normal;font-variant:normal;text-decoration:none;vertical-align:baseline;white-space:pre;white-space:pre-wrap;">見出し3のテスト</span></h3>' +
+        '<p dir="ltr" style="line-height:1.38;margin-top:0pt;margin-bottom:0pt;"><span style="font-size:11pt;font-family:Arial,sans-serif;color:#000000;background-color:transparent;font-weight:400;font-style:normal;font-variant:normal;text-decoration:none;vertical-align:baseline;white-space:pre;white-space:pre-wrap;">本文の段落です。</span></p>' +
+        LIST + '</b>';
+    } },
+  { name: 'D. Docs の既定スタイルの値を明示', desc: 'Docs 標準テンプレートの見出しサイズ・余白をそのまま指定（標準スタイルの文書なら見た目は同じになる）。',
+    html: () => fix(BODY(
+      '<h1 style="font-size:20pt;font-weight:400;margin:20pt 0 6pt;color:#000000">',
+      '<h2 style="font-size:16pt;font-weight:400;margin:18pt 0 6pt;color:#000000">',
+      '<h3 style="font-size:14pt;font-weight:400;margin:16pt 0 4pt;color:#434343">',
+      '<p style="margin:0">', LIST)) },
+  { name: 'E. 見出しを role="heading" の段落で', desc: 'h タグを使わず、見出しであることだけ伝える。',
+    html: () => '<p role="heading" aria-level="1">見出し1のテスト</p><p role="heading" aria-level="2">見出し2のテスト</p><p role="heading" aria-level="3">見出し3のテスト</p><p style="margin:0">本文の段落です。</p>' + LIST },
+];
+
+function wrap(name, inner) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><!--StartFragment-->${NAME(name)}${inner}<!--EndFragment--></body></html>`;
+}
+function copyHtml(html) {
+  const onCopy = (e) => { e.clipboardData.setData('text/html', html); e.clipboardData.setData('text/plain', '見出しテスト'); e.preventDefault(); };
+  document.addEventListener('copy', onCopy, { once: true });
+  const ok = document.execCommand('copy');
+  document.removeEventListener('copy', onCopy);
+  return ok;
+}
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const cards = document.getElementById('cards');
+VARIANTS.forEach((v) => {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `<h2 class="t">${esc(v.name)}</h2><p class="desc">${esc(v.desc)}</p><button>コピー</button>`;
+  const btn = card.querySelector('button');
+  btn.addEventListener('click', () => {
+    const ok = copyHtml(wrap(v.name, v.html()));
+    btn.textContent = ok ? 'コピーしました → Docs に貼り付け' : 'コピー失敗';
+    btn.classList.toggle('done', ok);
+    setTimeout(() => { btn.textContent = 'コピー'; btn.classList.remove('done'); }, 2500);
+  });
+  cards.appendChild(card);
+});
+</script>
+</body>
+</html>

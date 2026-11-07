@@ -7,9 +7,13 @@ An image-centric workflow plugin for Obsidian. Click images to enlarge with zoom
 - **Click to enlarge** — Click any image in your markdown notes to open it in a dark overlay
 - **Mouse wheel zoom** — Scroll to zoom in/out with smart 100% snap
 - **Copy / Download** — Copy image as PNG, save the original to disk, or copy the vault path
-- **Rich markdown copy** — When copying selected markdown that contains image embeds (`![[...]]` or `![](...)`), the plugin writes both plain markdown and an HTML version with images embedded as base64 data URLs, so pasting into Gmail / Google Docs / Slack shows the images inline
-- **Smart paste-back** — Pasting that rich clipboard back into Obsidian inserts the original `![[...]]` markdown (no base64 bloat)
-- **Copy as HTML with embedded images (command)** — Bind a hotkey to render the selection through Obsidian's Markdown renderer (headings, lists, callouts, etc.) and write rich HTML with embedded images
+- **Copy for… (destination picker)** — Copy the selection (or the whole note) formatted for the place you paste it: Google Docs, Gmail, Slack, Google Chat, Chatwork, or plain text. Available from the command palette, the editor right-click menu, and any hotkey you assign
+  - Google Docs / Gmail: rich HTML with images embedded as base64, highlights as background color, code blocks as a shaded single-cell table
+  - Slack / Google Chat: rich text plus `*bold*` markup fallback; highlights become bold, tables become aligned code blocks
+  - Chatwork: plain text with `[info]` / `[code]` / `[hr]` tags
+  - Plain text: no markdown symbols; tables become tab-separated values
+- **Smart paste-back** — Pasting a Google Docs / Gmail copy back into Obsidian inserts the original markdown (no base64 bloat)
+- **Cmd/Ctrl+C stays plain markdown** — Automatic rich copy on Cmd/Ctrl+C is optional (off by default)
 - **Easy dismiss** — Click the background or press `Escape` to close
 
 ## Installation
@@ -46,12 +50,12 @@ While the plugin is awaiting community-plugin review, install with [BRAT](https:
 | Click "Download" button / `Cmd/Ctrl + S` | Save image to disk |
 | `Cmd/Ctrl + Shift + C` (overlay) | Copy image path to clipboard |
 | Click background / `Escape` | Close overlay |
-| Select markdown with images, `Cmd/Ctrl + C` | Copy as rich text with embedded images for Gmail / Docs / Slack |
-| Command: *Copy selection as HTML with embedded images* | Full Markdown-rendered HTML + embedded images (assignable hotkey) |
+| Command / right-click: *Copy for…* | Pick a destination (Google Docs, Gmail, Slack, Google Chat, Chatwork, plain text). The last choice is listed first |
+| Commands: *Copy for Google Docs / Gmail / Slack / Google Chat / Chatwork / Plain text* | Copy directly for that destination (assignable hotkeys) |
 
 ## Settings
 
-- **Auto-embed images on copy** *(default: on)* — toggles the auto Cmd/Ctrl+C interception. Disable to use Obsidian's standard copy and rely solely on the *Copy selection as HTML with embedded images* command via your own hotkey.
+- **Rich copy on Cmd/Ctrl+C** *(default: off)* — when enabled, Cmd/Ctrl+C on a selection with image embeds writes Google Docs-friendly HTML. When off, Cmd/Ctrl+C is Obsidian's standard markdown copy.
 - **Format all markdown copies for Google apps** *(default: off)* — when enabled, every markdown selection copied with Cmd/Ctrl+C is written as Google Docs-friendly HTML, even if it has no images.
 - **Preserve line breaks for Google paste** *(default: on)* — keeps soft line breaks inside paragraphs as visible line breaks when pasting into Google Docs, Gmail, and other Google editors. Plain markdown clipboard text is unchanged.
 

@@ -1,4 +1,6 @@
-import { App, Component, Editor, FileSystemAdapter, MarkdownRenderer, MarkdownView, Notice, Plugin, PluginSettingTab, requestUrl, Scope, Setting, TFile } from 'obsidian';
+import { App, Component, Editor, FileSystemAdapter, MarkdownRenderer, MarkdownView, Notice, Plugin, PluginSettingTab, requestUrl, Scope, Setting, SuggestModal, TFile } from 'obsidian';
+import { buildChatHtml, serializeToText, TextFlavor } from './copy-text';
+import { buildClipboardHtml, CLIPBOARD_MARKER, DocsHeadingStyles, GOOGLE_DOCS_STANDARD_HEADINGS, HeadingLevel, HtmlTarget, inlineStyleForExternalPaste, preserveSoftLineBreaks } from './html-style';
 
 const IMG_SELECTOR = `.workspace-leaf-content[data-type='markdown'] img:not(a img), .workspace-leaf-content[data-type='image'] img`;
 const ZOOM_FACTOR = 0.8;
@@ -27,16 +29,38 @@ interface ImgInfo {
   top: number;
 }
 
+type CopyTarget = 'gdocs' | 'gmail' | TextFlavor;
+
+interface CopyTargetDef {
+  id: CopyTarget;
+  name: string;
+  desc: string;
+}
+
+const COPY_TARGETS: CopyTargetDef[] = [
+  { id: 'gdocs', name: 'Google Docs', desc: 'Rich HTML with embedded images' },
+  { id: 'gmail', name: 'Gmail', desc: 'Rich HTML with embedded images' },
+  { id: 'slack', name: 'Slack', desc: 'Rich text + *markup* (highlight becomes bold)' },
+  { id: 'gchat', name: 'Google Chat', desc: 'Rich text + *markup* (highlight becomes bold)' },
+  { id: 'chatwork', name: 'Chatwork', desc: 'Plain text with [info] / [code] tags' },
+  { id: 'plain', name: 'Plain text', desc: 'No markdown symbols' },
+];
+
+
 interface ImageWorkflowSettings {
   autoEmbedOnCopy: boolean;
   autoFormatMarkdownOnCopy: boolean;
   preserveSoftLineBreaks: boolean;
+  lastCopyTarget: CopyTarget;
+  docsHeadingStyles: DocsHeadingStyles;
 }
 
 const DEFAULT_SETTINGS: ImageWorkflowSettings = {
-  autoEmbedOnCopy: true,
+  autoEmbedOnCopy: false,
   autoFormatMarkdownOnCopy: false,
   preserveSoftLineBreaks: true,
+  lastCopyTarget: 'gdocs',
+  docsHeadingStyles: { ...GOOGLE_DOCS_STANDARD_HEADINGS },
 };
 
 export default class ImageEnlargePlugin extends Plugin {
@@ -72,9 +96,10 @@ export default class ImageEnlargePlugin extends Plugin {
     const text = data.getData('text/plain');
     if (!html || !text) return;
 
-    // Only override when HTML carries data: image URLs (i.e. we — or a similar tool —
-    // wrote a rich version). For ordinary HTML pastes, let Obsidian handle it normally.
-    if (!/<img\b[^>]*\bsrc=["']data:image\//i.test(html)) return;
+    // Only override when the HTML is our own rich copy (marker) or carries data:
+    // image URLs. For ordinary HTML pastes, let Obsidian handle it normally.
+    const isOwnCopy = html.includes(CLIPBOARD_MARKER);
+    if (!isOwnCopy && !/<img\b[^>]*\bsrc=["']data:image\//i.test(html)) return;
 
     evt.preventDefault();
     evt.stopPropagation();
@@ -92,8 +117,12 @@ export default class ImageEnlargePlugin extends Plugin {
     // Only intercept copies originating from a markdown leaf
     if (!target || !target.closest(`.workspace-leaf-content[data-type='markdown']`)) return;
 
-    const selection = target.win.getSelection();
-    const text = selection?.toString();
+    // Prefer the editor's source selection: the DOM selection loses markdown
+    // syntax hidden by Live Preview (e.g. ==highlight==) and lines outside the
+    // rendered viewport.
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const editorText = view && view.getMode() === 'source' ? view.editor.getSelection() : '';
+    const text = editorText || target.win.getSelection()?.toString();
     if (!text) return;
 
     if (!this.settings.autoFormatMarkdownOnCopy && !hasImageRef(text)) return;
@@ -113,12 +142,40 @@ export default class ImageEnlargePlugin extends Plugin {
     this.registerDomEvent(activeDocument, 'paste', this.handlePaste, true);
 
     this.addCommand({
-      id: 'copy-as-html-with-images',
-      name: 'Copy selection as HTML with embedded images',
+      id: 'copy-for-destination',
+      name: 'Copy for… (choose destination)',
       editorCallback: (editor: Editor) => {
-        void this.copySelectionAsRichHtml(editor);
+        new CopyTargetModal(this, editor).open();
       },
     });
+
+    // Keep the original command id so existing hotkeys keep working.
+    this.addCommand({
+      id: 'copy-as-html-with-images',
+      name: 'Copy for Google Docs (HTML with embedded images)',
+      editorCallback: (editor: Editor) => {
+        void this.copyFor('gdocs', editor);
+      },
+    });
+
+    COPY_TARGETS.filter((t) => t.id !== 'gdocs').forEach((t) => {
+      this.addCommand({
+        id: `copy-for-${t.id}`,
+        name: `Copy for ${t.name}`,
+        editorCallback: (editor: Editor) => {
+          void this.copyFor(t.id, editor);
+        },
+      });
+    });
+
+    this.registerEvent(this.app.workspace.on('editor-menu', (menu, editor) => {
+      menu.addItem((item) =>
+        item
+          .setTitle('Copy for…')
+          .setIcon('clipboard-copy')
+          .onClick(() => new CopyTargetModal(this, editor).open())
+      );
+    }));
 
     this.addSettingTab(new ImageWorkflowSettingTab(this.app, this));
   }
@@ -130,6 +187,10 @@ export default class ImageEnlargePlugin extends Plugin {
   async loadSettings() {
     const loaded = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, isSettingsObject(loaded) ? loaded : {});
+    this.settings.docsHeadingStyles = Object.assign({}, GOOGLE_DOCS_STANDARD_HEADINGS, this.settings.docsHeadingStyles);
+    if (!COPY_TARGETS.some((t) => t.id === this.settings.lastCopyTarget)) {
+      this.settings.lastCopyTarget = DEFAULT_SETTINGS.lastCopyTarget;
+    }
   }
 
   async saveSettings() {
@@ -159,6 +220,7 @@ export default class ImageEnlargePlugin extends Plugin {
 
     const imgView = doc.createElement('img');
     imgView.addClass('image-workflow-view');
+    imgView.setAttr('decoding', 'async');
     imgView.src = src;
 
     const btnGroup = doc.createElement('div');
@@ -183,12 +245,17 @@ export default class ImageEnlargePlugin extends Plugin {
   private fitImageWhenReady(imgView: HTMLImageElement) {
     if (imgView.complete && imgView.naturalWidth > 0) {
       this.calculateFitSize(imgView);
-    } else {
-      imgView.onload = () => {
-        if (!this.overlayEl) return;
-        this.calculateFitSize(imgView);
-      };
+      return;
     }
+
+    imgView.onload = () => {
+      if (!this.overlayEl) return;
+      this.calculateFitSize(imgView);
+    };
+    imgView.onerror = () => {
+      new Notice('Failed to load image');
+      this.closeOverlay();
+    };
   }
 
   private attachOverlayMouseHandlers(overlay: HTMLDivElement, imgView: HTMLImageElement, signal: AbortSignal) {
@@ -271,6 +338,7 @@ export default class ImageEnlargePlugin extends Plugin {
       top: (winH - h) / 2,
     };
     this.applyTransform(imgView);
+    imgView.addClass('is-ready');
   }
 
   private zoom(ratio: number, offset: { offsetX: number; offsetY: number }) {
@@ -461,39 +529,56 @@ export default class ImageEnlargePlugin extends Plugin {
     }
   }
 
-  // ---- Command: Copy selection as HTML with embedded images (Obsidian-rendered) ----
+  // ---- Copy for a destination (Docs / Gmail / chat apps / plain text) ----
 
-  private async copySelectionAsRichHtml(editor: Editor): Promise<void> {
-    const selection = editor.getSelection() || editor.getValue();
-    if (!selection) {
-      new Notice('Nothing selected');
+  async copyFor(target: CopyTarget, editor: Editor): Promise<void> {
+    const markdown = editor.getSelection() || editor.getValue();
+    if (!markdown) {
+      new Notice('Nothing to copy');
       return;
     }
     const sourcePath = this.app.workspace.getActiveFile()?.path ?? '';
+    const def = COPY_TARGETS.find((t) => t.id === target);
 
-    // Pass HTML as a Promise<Blob> so the browser preserves the user-gesture
-    // window across our async work (rendering + Mermaid wait + SVG raster can
-    // easily exceed 1s).
-    const htmlPromise = this.renderSelectionToHtmlBlob(selection, sourcePath, activeDocument);
-    const textBlob = new Blob([selection], { type: 'text/plain' });
+    if (this.settings.lastCopyTarget !== target) {
+      this.settings.lastCopyTarget = target;
+      void this.saveSettings();
+    }
+
+    // Pass Promise<Blob> values so the browser keeps the user-gesture window
+    // across the async rendering work.
+    const items: Record<string, Promise<Blob>> = {};
+    if (target === 'gdocs' || target === 'gmail') {
+      items['text/html'] = this.renderSelectionToHtmlBlob(markdown, sourcePath, activeDocument, target);
+      items['text/plain'] = Promise.resolve(new Blob([markdown], { type: 'text/plain' }));
+    } else {
+      const rendered = this.renderForText(markdown, sourcePath, activeDocument, target);
+      if (target === 'slack' || target === 'gchat') {
+        items['text/html'] = rendered.then((r) => new Blob([r.html], { type: 'text/html' }));
+      }
+      items['text/plain'] = rendered.then((r) => new Blob([r.text], { type: 'text/plain' }));
+    }
 
     try {
-      await navigator.clipboard.write([
-        new ClipboardItem({ 'text/html': htmlPromise, 'text/plain': textBlob }),
-      ]);
-      new Notice('Copied as HTML with embedded images');
+      await navigator.clipboard.write([new ClipboardItem(items)]);
+      new Notice(`Copied for ${def?.name ?? target}`);
     } catch (err) {
       console.error('Clipboard write failed', err);
       try {
-        await navigator.clipboard.writeText(selection);
-        new Notice('Copy failed — wrote plain text instead');
+        await navigator.clipboard.writeText(markdown);
+        new Notice('Copy failed — wrote markdown text instead');
       } catch {
         new Notice('Failed to copy');
       }
     }
   }
 
-  private async renderSelectionToHtmlBlob(selection: string, sourcePath: string, doc: Document): Promise<Blob> {
+  private async withRenderedMarkdown<T>(
+    markdown: string,
+    sourcePath: string,
+    doc: Document,
+    fn: (container: HTMLElement) => Promise<T>,
+  ): Promise<T> {
     const container = doc.createElement('div');
     // opacity:0 (not visibility:hidden) — Mermaid/MathJax post-processors skip
     // elements they consider "invisible". opacity:0 keeps them processable.
@@ -503,23 +588,37 @@ export default class ImageEnlargePlugin extends Plugin {
     renderComponent.load();
 
     try {
-      await MarkdownRenderer.render(this.app, selection, container, sourcePath, renderComponent);
+      await MarkdownRenderer.render(this.app, markdown, container, sourcePath, renderComponent);
       await waitForAsyncRenders(container);
-
-      container.querySelectorAll('.copy-code-button, .frontmatter, .frontmatter-container, .edit-block-button').forEach((el) => el.remove());
-      if (this.settings.preserveSoftLineBreaks) preserveSoftLineBreaks(container);
-      await convertSvgToImg(container);
-      inlineStyleForExternalPaste(container);
-      await this.embedRenderedImages(container, sourcePath);
-
-      // innerHTML source is Obsidian's MarkdownRenderer.render output (trusted),
-      // serialized into a clipboard payload (not re-injected into DOM).
-      const html = buildClipboardHtml(container.innerHTML);
-      return new Blob([html], { type: 'text/html' });
+      container
+        .querySelectorAll('.copy-code-button, .frontmatter, .frontmatter-container, .edit-block-button, .list-collapse-indicator, .collapse-indicator, .footnote-backref, button, .clickable-icon, svg.svg-icon')
+        .forEach((el) => el.remove());
+      return await fn(container);
     } finally {
       renderComponent.unload();
       container.remove();
     }
+  }
+
+  private renderForText(markdown: string, sourcePath: string, doc: Document, flavor: TextFlavor): Promise<{ html: string; text: string }> {
+    return this.withRenderedMarkdown(markdown, sourcePath, doc, async (container) => ({
+      text: serializeToText(container, flavor),
+      html: flavor === 'slack' || flavor === 'gchat' ? buildChatHtml(container) : '',
+    }));
+  }
+
+  private async renderSelectionToHtmlBlob(selection: string, sourcePath: string, doc: Document, target: HtmlTarget = 'gdocs'): Promise<Blob> {
+    return this.withRenderedMarkdown(selection, sourcePath, doc, async (container) => {
+      if (this.settings.preserveSoftLineBreaks) preserveSoftLineBreaks(container);
+      await convertSvgToImg(container);
+      inlineStyleForExternalPaste(container, target, this.settings.docsHeadingStyles);
+      await this.embedRenderedImages(container, sourcePath);
+
+      // innerHTML source is Obsidian's MarkdownRenderer.render output (trusted),
+      // serialized into a clipboard payload (not re-injected into DOM).
+      const html = buildClipboardHtml(container.innerHTML, target);
+      return new Blob([html], { type: 'text/html' });
+    });
   }
 
   // ---- Rich copy (markdown selection → text/plain + text/html with embedded images) ----
@@ -646,272 +745,6 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
     binary += String.fromCharCode.apply(null, Array.from(sub));
   }
   return btoa(binary);
-}
-
-const CALLOUT_COLORS: Record<string, { border: string; bg: string; title: string }> = {
-  note:     { border: '#448aff', bg: '#e3f2fd', title: '#1565c0' },
-  abstract: { border: '#00bcd4', bg: '#e0f7fa', title: '#00838f' },
-  summary:  { border: '#00bcd4', bg: '#e0f7fa', title: '#00838f' },
-  tldr:     { border: '#00bcd4', bg: '#e0f7fa', title: '#00838f' },
-  info:     { border: '#00b8d4', bg: '#e1f5fe', title: '#0277bd' },
-  todo:     { border: '#00b0ff', bg: '#e1f5fe', title: '#0277bd' },
-  tip:      { border: '#00bfa5', bg: '#e0f2f1', title: '#00695c' },
-  hint:     { border: '#00bfa5', bg: '#e0f2f1', title: '#00695c' },
-  important:{ border: '#00bfa5', bg: '#e0f2f1', title: '#00695c' },
-  success:  { border: '#00c853', bg: '#e8f5e9', title: '#2e7d32' },
-  check:    { border: '#00c853', bg: '#e8f5e9', title: '#2e7d32' },
-  done:     { border: '#00c853', bg: '#e8f5e9', title: '#2e7d32' },
-  question: { border: '#64dd17', bg: '#f1f8e9', title: '#558b2f' },
-  help:     { border: '#64dd17', bg: '#f1f8e9', title: '#558b2f' },
-  faq:      { border: '#64dd17', bg: '#f1f8e9', title: '#558b2f' },
-  warning:  { border: '#ff9100', bg: '#fff3e0', title: '#e65100' },
-  caution:  { border: '#ff9100', bg: '#fff3e0', title: '#e65100' },
-  attention:{ border: '#ff9100', bg: '#fff3e0', title: '#e65100' },
-  failure:  { border: '#ff5252', bg: '#ffebee', title: '#c62828' },
-  fail:     { border: '#ff5252', bg: '#ffebee', title: '#c62828' },
-  missing:  { border: '#ff5252', bg: '#ffebee', title: '#c62828' },
-  danger:   { border: '#ff1744', bg: '#ffebee', title: '#b71c1c' },
-  error:    { border: '#ff1744', bg: '#ffebee', title: '#b71c1c' },
-  bug:      { border: '#f50057', bg: '#fce4ec', title: '#ad1457' },
-  example:  { border: '#7c4dff', bg: '#ede7f6', title: '#4527a0' },
-  quote:    { border: '#9e9e9e', bg: '#fafafa', title: '#424242' },
-  cite:     { border: '#9e9e9e', bg: '#fafafa', title: '#424242' },
-};
-
-function setStyle(el: HTMLElement, css: string): void {
-  const existing = el.getAttribute('style') ?? '';
-  el.setAttribute('style', existing ? `${existing}; ${css}` : css);
-}
-
-function buildClipboardHtml(fragmentHtml: string): string {
-  const fragment =
-    '<div style="font-family:Arial, sans-serif; font-size:11pt; line-height:1.45; color:#202124">' +
-    fragmentHtml +
-    '</div>';
-
-  return '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>' +
-    '<!--StartFragment-->' +
-    fragment +
-    '<!--EndFragment-->' +
-    '</body></html>';
-}
-
-function inlineStyleForExternalPaste(root: HTMLElement): void {
-  styleParagraphs(root);
-  styleCodeBlocks(root);
-  styleInlineCode(root);
-  styleLists(root);
-  styleFootnotes(root);
-  styleHighlights(root);
-  styleBlockquotes(root);
-  styleCallouts(root);
-  styleTables(root);
-  styleImages(root);
-  styleHorizontalRules(root);
-  styleHeadings(root);
-  replaceTaskCheckboxes(root);
-}
-
-function styleParagraphs(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('p').forEach((p) => {
-    setStyle(p, 'margin:0 0 8px; line-height:1.45');
-  });
-}
-
-function preserveSoftLineBreaks(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('p, th, td').forEach((block) => {
-    if (block.closest('pre, code')) return;
-
-    const walker = root.doc.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-    const textNodes: Text[] = [];
-    let node = walker.nextNode();
-    while (node) {
-      textNodes.push(node as Text);
-      node = walker.nextNode();
-    }
-
-    textNodes.forEach((textNode) => {
-      const text = textNode.nodeValue ?? '';
-      if (!text.includes('\n')) return;
-
-      const fragment = root.doc.createDocumentFragment();
-      const parts = text.split(/(\n+)/);
-      parts.forEach((part) => {
-        if (!part) return;
-        if (/^\n+$/.test(part)) {
-          for (let i = 0; i < part.length; i++) {
-            fragment.appendChild(root.doc.createElement('br'));
-          }
-        } else {
-          fragment.appendChild(root.doc.createTextNode(part));
-        }
-      });
-      textNode.replaceWith(fragment);
-    });
-  });
-}
-
-// Code blocks: flatten to a single-cell <table> with plain text, since Docs is
-// unreliable with <pre>/<code> + syntax-highlight <span>s.
-function styleCodeBlocks(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('pre').forEach((pre) => {
-    const codeEl = pre.querySelector('code');
-    const raw = (codeEl ?? pre).innerText
-      || (codeEl ?? pre).textContent
-      || '';
-    const text = raw.replace(/^\n+|\n+$/g, '');
-
-    const table = root.doc.createElement('table');
-    table.setAttribute('style',
-      'border-collapse:collapse; margin:8px 0; width:100%; ' +
-      'background:#f6f8fa; border:1px solid #e1e4e8; border-radius:6px'
-    );
-    const tr = root.doc.createElement('tr');
-    const td = root.doc.createElement('td');
-    td.setAttribute('style',
-      'padding:12px 16px; ' +
-      'font-family:Menlo, Consolas, "Courier New", monospace; ' +
-      'font-size:13px; line-height:1.45; color:#24292e; ' +
-      'white-space:pre-wrap; word-break:break-word; ' +
-      'border:1px solid #e1e4e8'
-    );
-    const lines = text.split('\n');
-    lines.forEach((line, i) => {
-      const span = root.doc.createElement('span');
-      span.textContent = line.replace(/\t/g, '    ');
-      td.appendChild(span);
-      if (i < lines.length - 1) td.appendChild(root.doc.createElement('br'));
-    });
-    tr.appendChild(td);
-    table.appendChild(tr);
-    pre.replaceWith(table);
-  });
-}
-
-// Inline code: Docs strips <code>, so wrap in <span>.
-function styleInlineCode(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('code').forEach((code) => {
-    if (code.closest('pre')) return;
-    const span = root.doc.createElement('span');
-    while (code.firstChild) span.appendChild(code.firstChild);
-    span.setAttribute('style',
-      'background:#f6f8fa; padding:2px 6px; border-radius:4px; ' +
-      'font-family:Menlo, Consolas, "Courier New", monospace; font-size:0.9em; color:#d6336c'
-    );
-    code.replaceWith(span);
-  });
-}
-
-function styleLists(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('ul, ol').forEach((list) => {
-    setStyle(list, 'margin:4px 0; padding-left:28px');
-  });
-  root.querySelectorAll<HTMLElement>('ul ul, ol ol, ul ol, ol ul').forEach((list) => {
-    setStyle(list, 'margin:2px 0; padding-left:28px');
-  });
-  root.querySelectorAll<HTMLElement>('li').forEach((li) => {
-    setStyle(li, 'margin:2px 0');
-  });
-}
-
-function styleFootnotes(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('section.footnotes, .footnotes').forEach((sec) => {
-    setStyle(sec, 'margin-top:24px; padding-top:12px; border-top:1px solid #d0d7de; font-size:0.9em; color:#586069');
-  });
-  root.querySelectorAll<HTMLElement>('sup, .footnote-ref').forEach((sup) => {
-    setStyle(sup, 'font-size:0.75em; vertical-align:super; line-height:0');
-  });
-}
-
-function styleHighlights(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('mark').forEach((mk) => {
-    setStyle(mk, 'background:#fff59d; padding:0 2px');
-  });
-}
-
-function styleBlockquotes(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('blockquote').forEach((bq) => {
-    if (bq.classList.contains('callout')) return;
-    setStyle(bq,
-      'border-left:4px solid #dfe2e5; margin:8px 0; padding:4px 12px; ' +
-      'color:#586069; background:#fafbfc'
-    );
-  });
-}
-
-function styleCallouts(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('.callout').forEach((co) => {
-    const type = (co.getAttribute('data-callout') || 'note').toLowerCase();
-    const colors = CALLOUT_COLORS[type] ?? CALLOUT_COLORS.note;
-    setStyle(co,
-      `border-left:4px solid ${colors.border}; background:${colors.bg}; ` +
-      `border-radius:4px; padding:10px 14px; margin:8px 0; color:#24292e`
-    );
-    co.querySelectorAll<HTMLElement>('.callout-title').forEach((t) => {
-      setStyle(t, `color:${colors.title}; font-weight:600; margin-bottom:4px; display:block`);
-    });
-    co.querySelectorAll<HTMLElement>('.callout-icon, .callout-fold').forEach((el) => el.remove());
-  });
-}
-
-function styleTables(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('table').forEach((tbl) => {
-    setStyle(tbl,
-      'border-collapse:collapse; margin:8px 0; border:1px solid #d0d7de; ' +
-      'width:auto; max-width:100%; table-layout:auto'
-    );
-  });
-  root.querySelectorAll<HTMLElement>('th, td').forEach((cell) => {
-    setStyle(cell,
-      'border:1px solid #d0d7de; padding:6px 12px; vertical-align:top; line-height:1.35'
-    );
-  });
-  root.querySelectorAll<HTMLElement>('th').forEach((th) => {
-    setStyle(th, 'background:#f6f8fa; font-weight:600');
-  });
-}
-
-function styleImages(root: HTMLElement): void {
-  root.querySelectorAll<HTMLImageElement>('img').forEach((img) => {
-    img.removeAttribute('srcset');
-    img.removeAttribute('loading');
-    img.removeAttribute('decoding');
-    img.removeAttribute('draggable');
-
-    const rect = img.getBoundingClientRect();
-    const width = img.width || Math.round(rect.width) || img.naturalWidth;
-    const height = img.height || Math.round(rect.height) || img.naturalHeight;
-    if (width > 0 && !img.getAttribute('width')) img.setAttribute('width', String(width));
-    if (height > 0 && !img.getAttribute('height')) img.setAttribute('height', String(height));
-
-    setStyle(img,
-      'display:block; max-width:100%; height:auto; margin:8px 0; border:0; outline:none'
-    );
-  });
-}
-
-function styleHorizontalRules(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('hr').forEach((hr) => {
-    setStyle(hr, 'border:0; border-top:1px solid #d0d7de; margin:16px 0');
-  });
-}
-
-const HEADING_SIZE: Record<string, string> = { H1: '1.8em', H2: '1.5em', H3: '1.25em', H4: '1.1em', H5: '1em', H6: '0.9em' };
-
-function styleHeadings(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6').forEach((h) => {
-    const size = HEADING_SIZE[h.tagName] ?? '1em';
-    setStyle(h, `font-weight:700; margin:0.6em 0 0.3em; font-size:${size}`);
-  });
-}
-
-function replaceTaskCheckboxes(root: HTMLElement): void {
-  root.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach((cb) => {
-    const span = root.doc.createElement('span');
-    span.textContent = cb.checked ? '☑ ' : '☐ ';
-    setStyle(span, 'font-family:monospace');
-    cb.replaceWith(span);
-  });
 }
 
 async function waitForAsyncRenders(container: HTMLElement): Promise<void> {
@@ -1081,6 +914,34 @@ async function fetchAsDataUrl(url: string): Promise<string | null> {
   }
 }
 
+// ---- Destination picker ----
+
+class CopyTargetModal extends SuggestModal<CopyTargetDef> {
+  constructor(private plugin: ImageEnlargePlugin, private editor: Editor) {
+    super(plugin.app);
+    this.setPlaceholder('Copy for…');
+  }
+
+  getSuggestions(query: string): CopyTargetDef[] {
+    const last = this.plugin.settings.lastCopyTarget;
+    const ordered = [
+      ...COPY_TARGETS.filter((t) => t.id === last),
+      ...COPY_TARGETS.filter((t) => t.id !== last),
+    ];
+    const q = query.trim().toLowerCase();
+    return q ? ordered.filter((t) => t.name.toLowerCase().includes(q) || t.id.includes(q)) : ordered;
+  }
+
+  renderSuggestion(target: CopyTargetDef, el: HTMLElement): void {
+    el.createDiv({ text: target.name });
+    el.createEl('small', { text: target.desc, cls: 'image-workflow-target-desc' });
+  }
+
+  onChooseSuggestion(target: CopyTargetDef): void {
+    void this.plugin.copyFor(target.id, this.editor);
+  }
+}
+
 // ---- Settings tab ----
 
 class ImageWorkflowSettingTab extends PluginSettingTab {
@@ -1096,13 +957,12 @@ class ImageWorkflowSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName('Auto-embed images on copy')
+      .setName('Rich copy on Cmd/Ctrl+C')
       .setDesc(
-        'When enabled, copying a markdown selection that contains image embeds ' +
-        '(![[...]] or ![](...)) writes an HTML version to the clipboard with images ' +
-        'embedded as base64 data URLs. This lets you paste images inline into Gmail, ' +
-        'Google Docs, and Slack. Disable to use Obsidian\'s default copy behavior. ' +
-        'The "Copy selection as HTML with embedded images" command stays available either way.'
+        'Off by default: Cmd/Ctrl+C copies plain markdown as usual. When enabled, ' +
+        'copying a selection that contains image embeds (![[...]] or ![](...)) writes ' +
+        'Google Docs-friendly HTML with images embedded as base64. Destination-specific ' +
+        'copies are always available from "Copy for…" (command palette / right-click).'
       )
       .addToggle((toggle) =>
         toggle
@@ -1144,5 +1004,35 @@ class ImageWorkflowSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl)
+      .setName('Google Docs heading styles')
+      .setHeading();
+    containerEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: 'Google Docs keeps any heading value that differs from the document\'s own heading style as manual formatting. ' +
+        'Enter CSS matching your Docs template (Format → Paragraph styles) so pasted headings follow it exactly.',
+    });
+    new Setting(containerEl)
+      .setName('Reset to Google Docs standard')
+      .addButton((btn) =>
+        btn.setButtonText('Reset').onClick(async () => {
+          this.plugin.settings.docsHeadingStyles = { ...GOOGLE_DOCS_STANDARD_HEADINGS };
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+    (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as HeadingLevel[]).forEach((level) => {
+      new Setting(containerEl)
+        .setName(`Heading ${level.slice(1)}`)
+        .addTextArea((ta) => {
+          ta.inputEl.rows = 2;
+          ta.inputEl.addClass('image-workflow-heading-css');
+          ta.setValue(this.plugin.settings.docsHeadingStyles[level]).onChange(async (value) => {
+            this.plugin.settings.docsHeadingStyles[level] = value.trim();
+            await this.plugin.saveSettings();
+          });
+        });
+    });
   }
 }

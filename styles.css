@@ -20,13 +20,20 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: var(--image-workflow-view-width);
-  height: var(--image-workflow-view-height);
-  transform: var(--image-workflow-view-transform);
+  width: var(--image-workflow-view-width, 1px);
+  height: var(--image-workflow-view-height, 1px);
+  transform: var(--image-workflow-view-transform, translate(-10000px, -10000px));
+  opacity: 0;
+  visibility: hidden;
   cursor: grab;
   max-width: none;
   max-height: none;
   border-radius: 4px;
+}
+
+.image-workflow-view.is-ready {
+  opacity: 1;
+  visibility: visible;
 }
 
 .image-workflow-render-buffer {
@@ -60,9 +67,7 @@
   padding: 8px 24px;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgba(31, 31, 31, 0.82);
   color: #fff;
   font-size: 14px;
   cursor: pointer;
@@ -71,4 +76,16 @@
 
 .image-workflow-btn:hover {
   background: rgba(255, 255, 255, 0.25);
+}
+
+.image-workflow-target-desc {
+  display: block;
+  color: var(--text-muted);
+}
+
+.image-workflow-heading-css {
+  width: 100%;
+  min-width: 320px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
 }
