@@ -16,9 +16,12 @@
 - [x] 「Copy for…」一覧（前回選択を先頭）、各貼り付け先コマンド、右クリック
 - [x] バージョン 1.3.0 に統一（manifest / package / lock / versions）
 - [x] tsc / build / 変換結果テスト（jsdom）
-- [ ] 実機確認（Docs / Gmail / Slack / Google Chat / Chatwork）
+- [x] 実機確認（Google Docs）
+- [ ] 実機確認（Gmail / Slack / Google Chat / Chatwork）
 
 ## Phase 2 以降
 
 - Gmail 向け画像縮小・圧縮、チャット向け画像の順次コピー
-- 画像の簡易編集（赤枠・矢印・文字・モザイク・切り抜き）
+- [x] 画像の簡易編集 v1（枠・矢印・文字・Undo・Copy・Save）
+- [x] PNG は元ファイルに上書き保存し、元画像と図形を PNG 内に保持（再編集・Revert 可能）
+- [ ] モザイク・切り抜き

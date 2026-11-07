@@ -12,7 +12,8 @@
   width: 100%;
   height: 100%;
   background: rgba(0, 0, 0, 0.7);
-  z-index: 9999;
+  /* Modal layer: Obsidian notices (--layer-notice) stay visible above it. */
+  z-index: var(--layer-modal, 50);
   cursor: default;
 }
 
@@ -88,4 +89,121 @@
   min-width: 320px;
   font-family: var(--font-monospace);
   font-size: var(--font-ui-smaller);
+}
+
+/* ---- Image editor ---- */
+
+.image-workflow-editor {
+  position: fixed;
+  inset: 0;
+  /* Modal layer: Obsidian notices (--layer-notice) stay visible above it. */
+  z-index: var(--layer-modal, 50);
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.85);
+}
+
+.image-workflow-editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: rgba(31, 31, 31, 0.95);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.image-workflow-editor-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.image-workflow-editor button.image-workflow-editor-btn {
+  height: auto;
+  box-shadow: none;
+  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.image-workflow-editor button.image-workflow-editor-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.image-workflow-editor button.image-workflow-editor-btn.is-active {
+  background: #fff;
+  color: #111;
+}
+
+.image-workflow-editor button.image-workflow-editor-btn.mod-cta {
+  background: var(--interactive-accent, #7c3aed);
+  border-color: transparent;
+  color: var(--text-on-accent, #fff);
+}
+
+.image-workflow-editor button.image-workflow-editor-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Obsidian styles every <button> (background, height, padding, shadow), so
+   the swatch rules need higher specificity to show the actual color. */
+.image-workflow-editor button.image-workflow-editor-swatch {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: 50%;
+  background-color: var(--swatch-color);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.image-workflow-editor button.image-workflow-editor-swatch:hover {
+  background-color: var(--swatch-color);
+  border-color: rgba(255, 255, 255, 0.8);
+}
+
+.image-workflow-editor button.image-workflow-editor-swatch.is-active {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6);
+  transform: scale(1.15);
+}
+
+.image-workflow-editor-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  overflow: hidden;
+}
+
+.image-workflow-editor-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  cursor: crosshair;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+.image-workflow-editor-canvas.is-text {
+  cursor: text;
+}
+
+.image-workflow-editor-text {
+  position: absolute;
+  min-width: 160px;
+  padding: 0 4px;
+  border: 1px dashed rgba(255, 255, 255, 0.8);
+  background: rgba(0, 0, 0, 0.35);
+  font-weight: 700;
+  outline: none;
 }

@@ -1,5 +1,6 @@
 import { App, Component, Editor, FileSystemAdapter, MarkdownRenderer, MarkdownView, Notice, Plugin, PluginSettingTab, requestUrl, Scope, Setting, SuggestModal, TFile } from 'obsidian';
 import { buildChatHtml, serializeToText, TextFlavor } from './copy-text';
+import { ImageEditor } from './image-editor';
 import { buildClipboardHtml, CLIPBOARD_MARKER, DocsHeadingStyles, GOOGLE_DOCS_STANDARD_HEADINGS, HeadingLevel, HtmlTarget, inlineStyleForExternalPaste, preserveSoftLineBreaks } from './html-style';
 
 const IMG_SELECTOR = `.workspace-leaf-content[data-type='markdown'] img:not(a img), .workspace-leaf-content[data-type='image'] img`;
@@ -200,7 +201,7 @@ export default class ImageEnlargePlugin extends Plugin {
   private openOverlay(src: string, doc: Document = activeDocument) {
     if (this.overlayEl) return;
 
-    const { overlay, imgView, copyBtn, downloadBtn, copyPathBtn } = this.buildOverlayDom(src, doc);
+    const { overlay, imgView, editBtn, copyBtn, downloadBtn, copyPathBtn } = this.buildOverlayDom(src, doc);
     this.overlayEl = overlay;
     doc.body.appendChild(overlay);
     this.fitImageWhenReady(imgView);
@@ -211,6 +212,10 @@ export default class ImageEnlargePlugin extends Plugin {
 
     this.attachOverlayMouseHandlers(overlay, imgView, signal);
     this.attachOverlayButtonHandlers({ copyBtn, downloadBtn, copyPathBtn, imgView, src, signal });
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.openEditor(src, doc);
+    }, { signal });
     this.registerOverlayKeymap(imgView, src);
   }
 
@@ -233,13 +238,14 @@ export default class ImageEnlargePlugin extends Plugin {
       btnGroup.appendChild(btn);
       return btn;
     };
+    const editBtn = make('Edit');
     const copyBtn = make('Copy');
     const downloadBtn = make('Download');
     const copyPathBtn = make('Copy Path');
 
     overlay.appendChild(imgView);
     overlay.appendChild(btnGroup);
-    return { overlay, imgView, copyBtn, downloadBtn, copyPathBtn };
+    return { overlay, imgView, editBtn, copyBtn, downloadBtn, copyPathBtn };
   }
 
   private fitImageWhenReady(imgView: HTMLImageElement) {
@@ -309,6 +315,7 @@ export default class ImageEnlargePlugin extends Plugin {
     scope.register(['Mod'], 'c', () => { this.copyImageToClipboard(imgView); return false; });
     scope.register(['Mod', 'Shift'], 'c', () => { this.copyImagePath(src); return false; });
     scope.register(['Mod'], 's', () => { void this.downloadImage(src); return false; });
+    scope.register(null, 'e', () => { this.openEditor(src, imgView.doc); return false; });
     this.overlayScope = scope;
     this.app.keymap.pushScope(scope);
   }
@@ -387,6 +394,15 @@ export default class ImageEnlargePlugin extends Plugin {
       '--image-workflow-view-height': `${info.curHeight}px`,
       '--image-workflow-view-transform': `translate(${info.left}px, ${info.top}px)`,
     });
+  }
+
+  private openEditor(src: string, doc: Document): void {
+    const isRemote = /^https?:\/\//i.test(src);
+    const found = isRemote ? null : this.app.vault.getAbstractFileByPath(this.srcToVaultPath(src));
+    const imageFile = found instanceof TFile ? found : null;
+    const notePath = this.app.workspace.getActiveFile()?.path ?? null;
+    this.closeOverlay();
+    new ImageEditor({ app: this.app, doc, src, imageFile, notePath }).open();
   }
 
   private srcToVaultPath(src: string): string {
