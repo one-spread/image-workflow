@@ -91,6 +91,7 @@ export function inlineStyleForExternalPaste(root: HTMLElement, target: HtmlTarge
   // (h1 = 2em, p = 1em margins, ...). So for Docs we emit values that equal the
   // target template: paragraphs/lists with zero margins, headings with the
   // configured heading styles. Matching values leave no override behind.
+  if (docsNative) unwrapListParagraphs(root);
   if (docsNative) styleBlocksForDocs(root, docsHeadingCss);
   else styleParagraphs(root);
   styleCodeBlocks(root);
@@ -103,6 +104,10 @@ export function inlineStyleForExternalPaste(root: HTMLElement, target: HtmlTarge
   styleCallouts(root, docsNative);
   styleBlockquotes(root, docsNative);
   styleTables(root);
+  if (docsNative) {
+    setDocsTableColumnWidths(root);
+    spaceAfterTablesForDocs(root);
+  }
   styleImages(root);
   styleHorizontalRules(root);
   if (!docsNative) styleHeadings(root);
@@ -383,6 +388,98 @@ function styleTables(root: HTMLElement): void {
     tbl.querySelectorAll<HTMLElement>('th').forEach((th) => {
       setStyle(th, 'background-color:#f6f8fa; font-weight:700');
     });
+  });
+}
+
+// Loose markdown lists (items separated by a blank line) render as
+// <li><p>...</p></li>. Docs turns that into an empty bullet followed by an
+// unbulleted paragraph, and spaces every item apart. Keep each item's text
+// directly in the <li>; several paragraphs in one item are joined with <br>.
+function unwrapListParagraphs(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('li').forEach((li) => {
+    const paragraphs = Array.from(li.children).filter((c) => c.tagName === 'P') as HTMLElement[];
+    paragraphs.forEach((p, i) => {
+      if (i > 0) p.before(root.ownerDocument.createElement('br'));
+      p.replaceWith(...Array.from(p.childNodes));
+    });
+  });
+}
+
+// Body width of a Docs page with the default setup (Letter, 1in margins).
+// A4 with 1in margins is 451pt; slightly narrower tables still fit.
+export const DOCS_TABLE_WIDTH_PT = 468;
+const DOCS_MIN_COLUMN_PT = 40;
+const DOCS_COLUMN_TEXT_CAP = 36;
+
+// Rough display width of a cell: full-width (CJK) characters count double.
+function textWeight(text: string): number {
+  let w = 0;
+  for (const ch of text.trim()) w += /[\u1100-\uffff]/.test(ch) ? 2 : 1;
+  return w;
+}
+
+// Docs ignores width:100% on pasted tables and sizes columns on its own, which
+// leaves tables at about two thirds of the page with short columns wrapping.
+// Give every column an explicit width, proportional to its longest cell
+// (capped so one long sentence does not take the whole table).
+function setDocsTableColumnWidths(root: HTMLElement): void {
+  const doc = root.ownerDocument;
+  root.querySelectorAll<HTMLTableElement>('table:not([data-iw-code])').forEach((tbl) => {
+    const rows = Array.from(tbl.rows);
+    const columns = rows.reduce((n, r) => Math.max(n, r.cells.length), 0);
+    if (columns === 0) return;
+    const weights: number[] = new Array<number>(columns).fill(1);
+    rows.forEach((r) => {
+      Array.from(r.cells).forEach((cell, i) => {
+        const w = Math.min(textWeight(cell.textContent ?? ''), DOCS_COLUMN_TEXT_CAP);
+        weights[i] = Math.max(weights[i], w);
+      });
+    });
+    const total = weights.reduce((a, b) => a + b, 0);
+    let widths = weights.map((w) => Math.max(DOCS_MIN_COLUMN_PT, (w / total) * DOCS_TABLE_WIDTH_PT));
+    const scale = DOCS_TABLE_WIDTH_PT / widths.reduce((a, b) => a + b, 0);
+    widths = widths.map((w) => Math.round(w * scale));
+
+    tbl.querySelector('colgroup')?.remove();
+    const colgroup = doc.createElement('colgroup');
+    widths.forEach((pt) => {
+      const col = doc.createElement('col');
+      col.setAttribute('width', String(Math.round((pt * 4) / 3)));
+      col.setAttribute('style', `width:${pt}pt`);
+      colgroup.appendChild(col);
+    });
+    tbl.insertBefore(colgroup, tbl.firstChild);
+    tbl.setAttribute('style', (tbl.getAttribute('style') ?? '').replace(/width:\s*100%/, `width:${DOCS_TABLE_WIDTH_PT}pt`));
+    rows.forEach((r) => {
+      Array.from(r.cells).forEach((cell, i) => {
+        if (cell.colSpan === 1 && widths[i]) setStyle(cell, `width:${widths[i]}pt`);
+      });
+    });
+  });
+}
+
+// Tables carry no margins for Docs (they turn into spacing inside every
+// cell), so text right after a table sticks to it. Add one empty paragraph
+// when the next block is body text, a list or another table.
+function spaceAfterTablesForDocs(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('table').forEach((tbl) => {
+    // Obsidian wraps each rendered block in a <div>; step out of wrappers that
+    // hold only the table, and look into the wrapper of the next block.
+    let anchor: HTMLElement = tbl;
+    while (!anchor.nextElementSibling && anchor.parentElement && anchor.parentElement !== root &&
+      anchor.parentElement.tagName === 'DIV' && anchor.parentElement.children.length === 1) {
+      anchor = anchor.parentElement;
+    }
+    const next = anchor.nextElementSibling as HTMLElement | null;
+    if (!next || next.getAttribute('data-iw-spacer')) return;
+    let block: Element = next;
+    while (block.tagName === 'DIV' && block.firstElementChild) block = block.firstElementChild;
+    if (!['P', 'UL', 'OL', 'TABLE'].includes(block.tagName)) return;
+    const spacer = root.ownerDocument.createElement('p');
+    spacer.setAttribute('data-iw-spacer', '1');
+    setStyle(spacer, 'margin:0');
+    spacer.appendChild(root.ownerDocument.createElement('br'));
+    anchor.after(spacer);
   });
 }
 

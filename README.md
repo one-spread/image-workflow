@@ -10,6 +10,7 @@ An image-centric workflow plugin for Obsidian. Click images to enlarge with zoom
 - **Annotate (Edit)** — Draw boxes, arrows, text and mosaics, or crop the image, with undo. PNG images are saved in place: the untouched original and the shapes are kept inside the file, so annotations stay editable and *Revert* restores the original exactly. Other formats are saved as `<name>-edited.png` with the note's embeds relinked
 - **Copy for… (destination picker)** — Copy the selection (or the whole note) formatted for the place you paste it: Google Docs, Gmail, Slack, Google Chat, Chatwork, or plain text. Available from the command palette, the editor right-click menu, and any hotkey you assign
   - Google Docs / Gmail: rich HTML with images embedded as base64, highlights as background color, code blocks as a shaded single-cell table
+  - Google Docs: tables get explicit column widths that fill the page body (Docs ignores `width:100%`), loose list items paste without empty bullets, and a blank line is kept after each table
   - Slack / Google Chat: rich text plus `*bold*` markup fallback; highlights become bold, tables become aligned code blocks
   - Chatwork: plain text with `[info]` / `[code]` / `[hr]` tags
   - Plain text: no markdown symbols; tables become tab-separated values
