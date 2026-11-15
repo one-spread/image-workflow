@@ -1,4 +1,4 @@
-// Focused no-dependency regression tests. Run: node tests-image-editor.mjs
+// Focused no-dependency regression tests. Run: node tests/image-editor.test.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -10,7 +10,7 @@ const writes = [];
 let metadata;
 let original;
 const module = { exports: {} };
-const code = ts.transpileModule(fs.readFileSync(new URL('./image-editor.ts', import.meta.url), 'utf8'), {
+const code = ts.transpileModule(fs.readFileSync(new URL('../image-editor.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
 }).outputText;
 class TFile {}

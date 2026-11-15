@@ -29,7 +29,7 @@ An image-centric workflow plugin for Obsidian. Click images to enlarge with zoom
 
 ### Via BRAT (beta installer)
 
-While the plugin is awaiting community-plugin review, install with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
+To install a pre-release build, use [BRAT](https://github.com/TfTHacker/obsidian42-brat):
 
 1. Install the BRAT plugin from Community plugins
 2. BRAT → "Add Beta plugin" → paste `one-spread/image-workflow`
@@ -79,6 +79,14 @@ The built `main.js` is output to the project root. Symlink the project directory
 
 - **Desktop only** — Uses the Clipboard API (`ClipboardItem`), which requires Electron
 - **Obsidian** ≥ 1.4.0
+
+## Disclosures
+
+- **Network use** — Image Workflow makes no network requests on its own. When you copy, download, or rich-copy a note that embeds a remote image (`http://` or `https://` URL), the plugin downloads that image from its host with Obsidian's `requestUrl` so it can be placed on the clipboard or saved. Nothing is uploaded.
+- **Clipboard** — Copy actions write images, HTML, and text to the system clipboard only when you trigger them.
+- **Files outside the vault** — The plugin does not read files outside your vault. *Download* hands the image to the standard save/download flow, so the file is written only where you save it.
+- **No accounts, payments, ads, or telemetry** — The plugin is free, needs no account, and collects no data.
+- **Source** — Fully open source under the MIT license.
 
 ## Reporting issues
 
